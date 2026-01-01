@@ -76,14 +76,39 @@ class LLMEngine(multiprocessing.Process):
                         )
 
                         full_content = ""
+                        sentence_buffer = ""  # 句子缓冲区
+                        sentence_endings = ("。", "！", "？", ".", "!", "?", "…", "~")
+                        
                         for chunk in stream:
                             # 提取内容 delta
                             if chunk.choices and chunk.choices[0].delta.content:
                                 content = chunk.choices[0].delta.content
                                 full_content += content
-                                # 将片段放入队列供 TTS 消费
-                                self.output_queue.put({"text_chunk": content, "end": False})
+                                sentence_buffer += content
+                                
+                                # 检查是否有完整句子可以发送
+                                while any(end in sentence_buffer for end in sentence_endings):
+                                    # 找到第一个句子结束符的位置
+                                    min_pos = len(sentence_buffer)
+                                    for end in sentence_endings:
+                                        pos = sentence_buffer.find(end)
+                                        if pos != -1 and pos < min_pos:
+                                            min_pos = pos
+                                    
+                                    # 提取完整句子并发送给 TTS
+                                    if min_pos < len(sentence_buffer):
+                                        sentence = sentence_buffer[:min_pos + 1]
+                                        sentence_buffer = sentence_buffer[min_pos + 1:]
+                                        if sentence.strip():
+                                            # 立即发送完整句子，实现真正的流式 TTS
+                                            self.output_queue.put({"text_chunk": sentence, "end": False})
+                                    else:
+                                        break
 
+                        # 发送剩余内容
+                        if sentence_buffer.strip():
+                            self.output_queue.put({"text_chunk": sentence_buffer, "end": False})
+                            
                         print(f"[LLM] 完整回复: {full_content}")
                         # 发送结束信号
                         self.output_queue.put({"text_chunk": "", "end": True})

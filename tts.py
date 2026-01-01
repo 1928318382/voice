@@ -190,57 +190,130 @@ class TTSEngine(multiprocessing.Process):
     # ================= 轻量后处理 =================
 
     def _postprocess_wav(self, path: str):
-        """削减尾部静音/底噪，避免削波失真。"""
+        """
+        针对 Tacotron2 的尾部问题进行激进后处理：
+        1. 检测并移除重复模式（循环怪声）
+        2. 检测能量骤降点作为结束位置
+        3. 应用淡出避免爆音
+        """
         y, sr = sf.read(path, dtype="float32")
         if y.size == 0:
             return
 
-        # 统一用单声道能量计算，但保留原声道数据裁切
+        # 统一为单声道处理
         if y.ndim > 1:
             mono = y.mean(axis=1)
         else:
-            mono = y
+            mono = y.copy()
 
-        # 计算帧能量，用于找尾部静音
-        win = max(int(sr * 0.02), 1)   # 20ms
-        hop = max(int(sr * 0.01), 1)   # 10ms
-        n_frames = max((len(mono) - win) // hop + 1, 1)
-        rms = np.empty(n_frames, dtype=np.float32)
-
+        original_len = len(mono)
+        
+        # ===== 策略1: 基于能量梯度找到语音结束点 =====
+        # 使用更短的窗口以便精确定位
+        win_ms = 30  # 30ms 窗口
+        hop_ms = 10  # 10ms 步进
+        win = int(sr * win_ms / 1000)
+        hop = int(sr * hop_ms / 1000)
+        
+        if len(mono) < win * 2:
+            return  # 太短，不处理
+        
+        n_frames = (len(mono) - win) // hop + 1
+        rms = np.zeros(n_frames, dtype=np.float32)
+        
         for i in range(n_frames):
             start = i * hop
             frame = mono[start:start + win]
-            if len(frame) == 0:
-                rms[i] = 0.0
-            else:
-                rms[i] = np.sqrt(np.mean(frame * frame))
-
-        max_rms = float(np.max(rms))
-        if max_rms > 0:
-            # 低于最大能量 45dB 认为是静音
-            thresh = max_rms * (10 ** (-45.0 / 20.0))
-            # 找到最后一个超过阈值的帧
-            last_idx = int(np.max(np.where(rms > thresh)[0])) if np.any(rms > thresh) else 0
-            tail_keep = int(sr * 0.08)  # 尾部保留 80ms，避免硬切
-            end_sample = min((last_idx * hop) + win + tail_keep, len(mono))
-            if end_sample > 0:
-                y = y[:end_sample]
-
-        # 防止削波失真
-        peak = float(np.max(np.abs(y))) if y.size else 0.0
-        if peak > 0.99:
-            y = y * (0.99 / peak)
-
-        # 轻微淡出，减少尾部“啪”声
-        fade_len = min(int(sr * 0.025), len(y))  # 25ms
+            rms[i] = np.sqrt(np.mean(frame ** 2)) if len(frame) > 0 else 0
+        
+        if len(rms) < 3:
+            return
+            
+        # 找到 RMS 峰值位置
+        max_rms = np.max(rms)
+        if max_rms == 0:
+            return
+        
+        # ===== 策略2: 检测重复模式（自相关法）=====
+        # Tacotron2 尾部重复通常有固定周期
+        def detect_repetition_start(signal, sr, min_period_ms=50, max_period_ms=300):
+            """检测重复模式开始的位置"""
+            min_period = int(sr * min_period_ms / 1000)
+            max_period = int(sr * max_period_ms / 1000)
+            
+            # 只分析后30%部分（更保守）
+            analyze_start = int(len(signal) * 0.7)
+            segment = signal[analyze_start:]
+            
+            if len(segment) < max_period * 3:
+                return None
+            
+            # 计算短时自相关寻找重复
+            chunk_size = int(sr * 0.1)  # 100ms 块
+            n_chunks = len(segment) // chunk_size
+            
+            for i in range(n_chunks - 2):
+                chunk1 = segment[i * chunk_size:(i + 1) * chunk_size]
+                chunk2 = segment[(i + 1) * chunk_size:(i + 2) * chunk_size]
+                
+                # 计算归一化互相关
+                if np.std(chunk1) > 0.001 and np.std(chunk2) > 0.001:
+                    corr = np.corrcoef(chunk1, chunk2)[0, 1]
+                    if corr > 0.92:  # 更高阈值 = 更保守，只切真正重复的
+                        return analyze_start + i * chunk_size
+            
+            return None
+        
+        repetition_start = detect_repetition_start(mono, sr)
+        
+        # ===== 策略3: 基于能量下降找结束点 =====
+        # 找到最后一个能量超过峰值 8% 的位置（更保守）
+        energy_thresh = max_rms * 0.08
+        above_thresh = np.where(rms > energy_thresh)[0]
+        
+        if len(above_thresh) > 0:
+            last_active_frame = int(np.max(above_thresh))
+            energy_end = (last_active_frame * hop) + win
+        else:
+            energy_end = len(mono)
+        
+        # ===== 综合决策 =====
+        # 取最早的结束点
+        cut_points = [energy_end]
+        if repetition_start is not None:
+            cut_points.append(repetition_start)
+        
+        final_end = min(cut_points)
+        
+        # 确保至少保留 0.5 秒
+        min_len = int(sr * 0.5)
+        final_end = max(final_end, min_len)
+        final_end = min(final_end, len(mono))
+        
+        # 应用裁切
+        if final_end < len(y):
+            y = y[:final_end] if y.ndim == 1 else y[:final_end]
+            mono = mono[:final_end]
+        
+        # ===== 后处理: 淡出 =====
+        fade_len = min(int(sr * 0.05), len(y))  # 50ms 淡出
         if fade_len > 1:
             fade = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
             if y.ndim > 1:
                 y[-fade_len:, :] *= fade[:, None]
             else:
                 y[-fade_len:] *= fade
-
+        
+        # 防止削波
+        peak = float(np.max(np.abs(y))) if y.size else 0.0
+        if peak > 0.95:
+            y = y * (0.95 / peak)
+        
         sf.write(path, y, sr, subtype="PCM_16")
+        
+        if final_end < original_len:
+            removed_ms = (original_len - final_end) * 1000 // sr
+            print(f"[TTS] 裁切尾部 {removed_ms}ms (重复/噪声)")
 
 
 if __name__ == "__main__":

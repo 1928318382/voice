@@ -19,7 +19,7 @@ def features(X, sample_rate: float) -> np.ndarray:
     pitches, magnitudes = librosa.piptrack(y=X, sr=sample_rate, S=stft, fmin=70, fmax=400)
     pitch = []
     for i in range(magnitudes.shape[1]):
-        index = magnitudes[:, 1].argmax()
+        index = magnitudes[:, i].argmax()  # 修复：使用第i列而非固定第1列
         pitch.append(pitches[index, i])
 
     pitch_tuning_offset = librosa.pitch_tuning(pitches)
@@ -38,10 +38,11 @@ def features(X, sample_rate: float) -> np.ndarray:
     # 谱平面
     flatness = np.mean(librosa.feature.spectral_flatness(y=X))
 
-    # 使用系数为50的MFCC特征
-    mfccs = np.mean(librosa.feature.mfcc(y=X, sr=sample_rate, n_mfcc=50).T, axis=0)
-    mfccsstd = np.std(librosa.feature.mfcc(y=X, sr=sample_rate, n_mfcc=50).T, axis=0)
-    mfccmax = np.max(librosa.feature.mfcc(y=X, sr=sample_rate, n_mfcc=50).T, axis=0)
+    # 使用系数为50的MFCC特征（优化：只计算一次）
+    mfcc_raw = librosa.feature.mfcc(y=X, sr=sample_rate, n_mfcc=50).T
+    mfccs = np.mean(mfcc_raw, axis=0)
+    mfccsstd = np.std(mfcc_raw, axis=0)
+    mfccmax = np.max(mfcc_raw, axis=0)
 
     # 色谱图
     chroma = np.mean(librosa.feature.chroma_stft(S=stft, sr=sample_rate).T, axis=0)

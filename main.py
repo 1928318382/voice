@@ -64,6 +64,9 @@ class VoiceAssistant:
         
         # 音频缓冲区 (用于情感分析)
         self.audio_buffer = bytearray()
+        
+        # 队列溢出计数器（避免日志刷屏）
+        self._queue_overflow_count = 0
 
     def start(self):
         print("=" * 50)
@@ -150,6 +153,12 @@ class VoiceAssistant:
                     # 1. 给 ASR (用于转文字)
                     if not self.q_audio.full():
                         self.q_audio.put(pcm)
+                        self._queue_overflow_count = 0  # 重置计数器
+                    else:
+                        self._queue_overflow_count += 1
+                        # 每100次溢出只提示一次，避免刷屏
+                        if self._queue_overflow_count % 100 == 1:
+                            print(f"[Warning] 音频队列已满，丢弃数据 ({self._queue_overflow_count}帧)")
                     
                     # 2. 给 Emotion (存入缓冲)
                     self.audio_buffer.extend(pcm)

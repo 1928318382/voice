@@ -11,8 +11,7 @@ import shutil
 # 引入我们在 config.py 中新定义的绝对路径
 from config import ASR_MODEL_PATH, SAMPLE_RATE, BASE_DIR
 from enhancement import AudioEnhancer
-from speaker import SpeakerRecognizer
-from emotion import EmotionRecognizer
+# 注意：SpeakerRecognizer 和 EmotionRecognizer 已移至主进程，避免子进程重复加载
 from funasr import AutoModel
 
 
@@ -29,11 +28,10 @@ class ASREngine(multiprocessing.Process):
     def run(self):
         print("[ASR] 进程启动...")
 
-        # --- 初始化辅助模块 (预留接口) ---
-        # 如果你还没有实现这些文件的具体逻辑，确保它们对应的类存在或先注释掉
+        # --- 初始化辅助模块 ---
+        # 语音增强模块（降噪等）
         enhancer = AudioEnhancer()
-        spk_rec = SpeakerRecognizer()
-        emo_rec = EmotionRecognizer()
+        # 注意：声纹识别和情感识别已移至主进程处理
 
         model_instance = None
 
@@ -108,9 +106,9 @@ class ASREngine(multiprocessing.Process):
 
     def process_buffer(self, model):
         """将缓冲区音频拼接并送入模型识别"""
-        # 简单检查缓冲区大小，避免太短的误触
-        if len(self.audio_buffer) < 5:
-            print("[ASR] 音频过短，忽略")
+        # 简单检查缓冲区大小，避免太短的误触（提升至10帧=0.6秒，更可靠）
+        if len(self.audio_buffer) < 10:
+            print("[ASR] 音频过短（<0.6秒），忽略")
             self.audio_buffer = []
             return
 
