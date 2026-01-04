@@ -199,21 +199,17 @@ python main.py
 
 在一台新机器上，从零复现当前可运行版本的大致步骤如下：
 
-1. 创建并激活 Conda 环境：
 
-conda create -n voice python=3.10
-conda activate voice
+我现在将使用uv管理器解决环境依赖问题
 
-2. 安装依赖（假设已有 requirements.txt）：
-sudo apt update
-sudo apt install build-essential -y
-sudo apt install portaudio19-dev libsndfile1 -y
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-提示：coqui-tts 仅支持 Python 3.9-3.12，如遇 “No matching distribution”，请检查当前 Python 版本。
-pip install pandas
-sudo apt install ffmpeg
+pip install uv
+
+uv sync --frozen
+
+source .venv/bin/activate
+
+还有一些系统级环境，如ffmpeg，报错就下即可，有的要从官网下
+
 3. 准备模型文件夹（拷贝或解压得到）：
 
 - 将 models/tts_models--zh-CN--baker--tacotron2-DDC-GST/ 放到项目根目录下  
@@ -221,14 +217,14 @@ sudo apt install ffmpeg
 
 4. 运行配置修补与 TTS 测试脚本：
 
-python fix_tts.py
+uv run python fix_tts.py
 
 5. （可选）预下载 ASR 模型：
 
-python download.py
+uv run python download.py
 
 6. 启动主程序：
 
-python main.py
+uv run python main.py
 
 若以上步骤均成功，便可在新环境中完整复现你当前版本的语音对话助手。
