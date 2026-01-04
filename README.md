@@ -21,44 +21,68 @@
 - asr.py：ASR 引擎封装（FunASR）  
 - tts.py：TTS 引擎封装（本地 Coqui TTS，多进程）  
 - llm.py：LLM 调用逻辑封装（HTTP API）  
-- audio_io.py：录音 / 播放相关逻辑  
-- led.py：状态灯相关逻辑  
+- hardware.py：录音 / 播放 / 状态灯等硬件相关逻辑  
+- emotion.py：情感识别模块（可选，运行时自动兜底）  
 - download.py：可选的模型预下载脚本  
-- fix_tts_config_and_test.py：用于修补 Coqui TTS 配置并测试合成  
+- fix_tts.py：用于修补 Coqui TTS 配置并测试合成  
 - models/：存放本地模型的目录（ASR 缓存 + Coqui TTS 模型）
 
 ---
 
 ## 2. 环境准备
 
-### 2.1 Python 与 Conda 环境（推荐）
+本项目使用 `uv` 管理依赖（`pyproject.toml` + `uv.lock`），并在项目根目录创建 `.venv`。
 
-建议使用 Python 3.10 和 Conda 虚拟环境，避免与其他项目冲突。
+### 2.1 安装 uv
 
-在终端中执行：
+Linux：
 
-conda create -n voice python=3.10
-conda activate voice
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
-### 2.2 安装依赖
+Windows（PowerShell）：
 
-项目建议使用 requirements.txt 管理依赖。
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex
+```
 
-在虚拟环境 voice 中执行：
+若本机未安装 Python 3.10，可用 uv 安装：
 
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
- 
-如未提供 requirements.txt，依赖主要包括（仅列出名称，实际版本参考你的当前环境）：
+```bash
+uv python install 3.10
+```
 
-- PyTorch（包含 torch 与 torchaudio，CPU 或 GPU 版本均可）  
-- coqui-tts（Coqui TTS）  
-- funasr、modelscope、onnxruntime（ASR）  
-- numpy（建议 < 2.0）  
-- 音频相关包：librosa、soundfile、sounddevice 或 pyaudio  
-- LLM 调用相关：requests、openai（如使用兼容 OpenAI 协议的接口）  
+### 2.2 安装项目依赖（推荐）
 
-如安装 pyaudio 困难，可只使用 sounddevice，并在项目中统一使用它录音。
+在项目根目录执行（使用锁文件确保可复现）：
+
+```bash
+uv sync --frozen
+```
+
+说明：
+- `uv sync`：按 `pyproject.toml` 解析并安装依赖
+- `uv sync --frozen`：严格按 `uv.lock` 安装（推荐用于复现）
+
+> `requirements.txt` 为历史遗留文件；以 `pyproject.toml` / `uv.lock` 为准。
+
+### 2.3 系统级依赖（按需）
+
+如遇到音频/编解码相关报错，通常需要安装 `ffmpeg`（以及部分平台需要 `portaudio` 等）。
+
+Linux（Debian/Ubuntu）：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ffmpeg
+```
+
+Windows（Chocolatey）：
+
+```powershell
+choco install ffmpeg
+```
 
 ---
 
@@ -71,15 +95,16 @@ ASR 使用 ModelScope 上的中文模型，模型 ID 配置在 config.py 中（�
 
 你可以选择：
 
-- 在第一次运行 main.py 时自动下载，或者  
+- 在第一次运行 `uv run python main.py` 时自动下载，或者  
 - 预先运行 download.py（如果项目提供）进行缓存。
 
 预下载示例命令：
 
-conda activate voice
-python download.py
+```bash
+uv run python download.py
+```
 
-若未提供 download.py，直接运行 python main.py 也会在第一次调用 ASR 时自动下载。
+若未提供 download.py，直接运行 `uv run python main.py` 也会在第一次调用 ASR 时自动下载。
 
 ### 3.2 TTS 模型（Coqui 中文模型）
 
@@ -107,7 +132,7 @@ TTS 使用 Coqui 的中文模型，目录结构要求如下（示意）：
 
 许多 Coqui 模型的原始 config.json 内，stats_path（或类似字段）会指向原作者机器上的绝对路径（例如 /home/.../scale_stats.npy），在你本地会导致找不到文件。
 
-本项目提供了 fix_tts_config_and_test.py 用于自动修补：
+本项目提供了 `fix_tts.py` 用于自动修补：
 
 步骤：
 
@@ -118,8 +143,9 @@ TTS 使用 Coqui 的中文模型，目录结构要求如下（示意）：
 
 2. 在项目根目录运行：
 
-conda activate voice
-python fix_tts_config_and_test.py
+```bash
+uv run python fix_tts.py
+```
 
 运行成功后：
 
@@ -158,15 +184,17 @@ python fix_tts_config_and_test.py
 
 如有 download.py，可以先执行预下载：
 
-conda activate voice
-python download.py
+```bash
+uv run python download.py
+```
 
 ### 6.2 测试 TTS 模块（可选）
 
 若想单独测试 TTS，可以运行（按你当前版本的 tts.py 支持情况）：
 
-conda activate voice
-python tts.py
+```bash
+uv run python tts.py
+```
 
 一般会输出一段测试语音，用于确认 Coqui 本地模型与播放逻辑均正常。
 
@@ -174,8 +202,9 @@ python tts.py
 
 在项目根目录执行：
 
-conda activate voice
-python main.py
+```bash
+uv run python main.py
+```
 
 典型交互流程：
 
@@ -199,32 +228,61 @@ python main.py
 
 在一台新机器上，从零复现当前可运行版本的大致步骤如下：
 
+1. 安装 uv：
 
-我现在将使用uv管理器解决环境依赖问题
+Linux：
 
-pip install uv
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
+Windows（PowerShell）：
+
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex
+```
+
+2. 安装依赖（严格使用锁文件）：
+
+```bash
 uv sync --frozen
+```
 
+3. （可选）如你需要进入虚拟环境：
+
+```bash
 source .venv/bin/activate
+```
 
-还有一些系统级环境，如ffmpeg，报错就下即可，有的要从官网下
+Windows（PowerShell）：
 
-3. 准备模型文件夹（拷贝或解压得到）：
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+> 还有一些系统级依赖，如 `ffmpeg`；遇到报错再按提示安装即可。
+
+4. 准备模型文件夹（拷贝或解压得到）：
 
 - 将 models/tts_models--zh-CN--baker--tacotron2-DDC-GST/ 放到项目根目录下  
 - 确保其中包含 model_file.pth、config.json、scale_stats.npy
 
-4. 运行配置修补与 TTS 测试脚本：
+5. 运行配置修补与 TTS 测试脚本：
 
+```bash
 uv run python fix_tts.py
+```
 
-5. （可选）预下载 ASR 模型：
+6. （可选）预下载 ASR 模型：
 
+```bash
 uv run python download.py
+```
 
-6. 启动主程序：
+7. 启动主程序：
 
+```bash
 uv run python main.py
+```
 
 若以上步骤均成功，便可在新环境中完整复现你当前版本的语音对话助手。
