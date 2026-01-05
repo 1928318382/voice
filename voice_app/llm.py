@@ -1,7 +1,7 @@
 import multiprocessing
 import queue
 import time
-from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_NAME
+from .config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_NAME
 
 
 class LLMEngine(multiprocessing.Process):
@@ -40,13 +40,16 @@ class LLMEngine(multiprocessing.Process):
                 data = self.input_queue.get(timeout=1)
                 user_text = data["text"]
                 emotion = data.get("emotion", "neutral")
+                speaker = data.get("speaker", "unknown")
 
-                print(f"[LLM] 收到输入: {user_text} (情绪: {emotion})")
+                print(f"[LLM] 收到输入: {user_text} (情绪: {emotion}, 说话人: {speaker})")
 
                 # --- 1. 构建 Prompt (使用标准 Messages 格式) ---
+                speaker_info = f"说话人：{speaker}。" if speaker != "unknown" else ""
                 system_prompt = (
                     "你是一个基于树莓派的智能助手'小派'。"
                     f"用户当前情绪：{emotion}。"
+                    f"{speaker_info}"
                     "请用简短、亲切的中文回复（50字以内）。"
                     "不要使用Markdown格式，直接输出纯文本。"
                 )

@@ -9,14 +9,14 @@ import soundfile as sf
 import shutil
 
 # 引入我们在 config.py 中新定义的绝对路径
-from config import ASR_MODEL_PATH, SAMPLE_RATE, BASE_DIR
-from enhancement import AudioEnhancer
+from .config import ASR_MODEL_PATH, SAMPLE_RATE, BASE_DIR
+from .enhancement import AudioEnhancer
 # 注意：SpeakerRecognizer 和 EmotionRecognizer 已移至主进程，避免子进程重复加载
 from funasr import AutoModel
 
 
 class ASREngine(multiprocessing.Process):
-    def __init__(self, audio_queue, text_queue, command_queue, mock=False):
+    def __init__(self, audio_queue, text_queue, command_queue, mock=False, enhancer=None, speaker_recognizer=None):
         super().__init__()
         self.audio_queue = audio_queue
         self.text_queue = text_queue
@@ -24,13 +24,16 @@ class ASREngine(multiprocessing.Process):
         self.mock = mock
         self.running = True
         self.audio_buffer = []
+        self.enhancer = enhancer  # 语音增强器实例
+        self.speaker_recognizer = speaker_recognizer  # 声纹识别器实例
 
     def run(self):
         print("[ASR] 进程启动...")
 
         # --- 初始化辅助模块 ---
         # 语音增强模块（降噪等）
-        enhancer = AudioEnhancer()
+        if self.enhancer is None:
+            self.enhancer = AudioEnhancer()
         # 注意：声纹识别和情感识别已移至主进程处理
 
         model_instance = None
@@ -42,7 +45,7 @@ class ASREngine(multiprocessing.Process):
 
             if not os.path.exists(flag_file):
                 print("[ASR] ⚠️ 未检测到模型下载标记 (.asr_download_ok)")
-                print("[ASR] 请先运行 python download.py 下载模型！")
+                print("[ASR] 请先运行 python scripts/download_asr.py 下载模型！")
                 print("[ASR] -> 自动切换为 Mock 模式")
                 self.mock = True
             elif not os.path.exists(ASR_MODEL_PATH):
@@ -124,6 +127,14 @@ class ASREngine(multiprocessing.Process):
             # 1. 拼接音频
             full_audio = b"".join(self.audio_buffer)
 
+            # === 新增：语音增强处理 ===
+            if self.enhancer and hasattr(self.enhancer, 'process'):
+                try:
+                    full_audio = self.enhancer.process(full_audio)
+                    print("[ASR] 语音增强处理完成")
+                except Exception as e:
+                    print(f"[ASR] 语音增强失败: {e}")
+
             # 2. 写入临时文件 (FunASR 目前对文件输入支持最稳)
             tmp_file = os.path.join(tempfile.gettempdir(), f"speech_{uuid.uuid4()}.wav")
 
@@ -166,8 +177,21 @@ class ASREngine(multiprocessing.Process):
             text = text.replace(" ", "").strip()
             print(f"[ASR] 识别结果: 【{text}】")
 
+            # === 声纹识别 ===
+            speaker_id = "unknown"
+            if self.speaker_recognizer and full_audio:
+                try:
+                    speaker_id = self.speaker_recognizer.identify(full_audio)
+                except Exception as e:
+                    print(f"[ASR] 声纹识别失败: {e}")
+                    speaker_id = "unknown"
+
             # 发送给主进程 (Main -> LLM)
-            self.text_queue.put({"text": text, "emotion": emotion_tag})
+            self.text_queue.put({
+                "text": text,
+                "emotion": emotion_tag,
+                "speaker": speaker_id
+            })
         else:
             print("[ASR] 未识别到有效内容")
 

@@ -109,6 +109,7 @@ dependencies = [
     "propcache==0.4.1",
     "protobuf==6.33.2",
     "psutil==7.2.0",
+    "pyaudio>=0.2.14",
     "pycparser==2.23",
     "pycryptodome==3.23.0",
     "pydantic==2.12.5",

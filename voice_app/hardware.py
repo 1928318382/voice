@@ -1,6 +1,6 @@
 import time
 import numpy as np
-from config import SystemState, SAMPLE_RATE, CHUNK_SIZE, MIC_DEVICE_INDEX
+from .config import SystemState, SAMPLE_RATE, CHUNK_SIZE, MIC_DEVICE_INDEX
 
 
 class LEDController:

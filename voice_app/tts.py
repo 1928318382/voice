@@ -16,7 +16,7 @@ import soundfile as sf
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 
 from TTS.api import TTS as CoquiTTS  # 来自 coqui-tts
-from config import TTS_MODEL_PATH, TTS_CONFIG_PATH
+from .config import TTS_MODEL_PATH, TTS_CONFIG_PATH
 
 
 class TTSEngine(multiprocessing.Process):

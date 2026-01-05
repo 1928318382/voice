@@ -6,3 +6,8 @@ __pycache__/
 .DS_Store
 .AppleDouble
 .LSOverride
+.venv/
+.asr_download_ok
+*.wav
+emotional/features/
+emotional/datasets/
