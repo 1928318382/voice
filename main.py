@@ -7,6 +7,7 @@ import sys
 import os
 import threading
 import queue
+import json
 from typing import Optional
 
 # 将项目根目录添加到 Python 路径
@@ -99,6 +100,7 @@ class VoiceAssistant:
         self.q_llm_input = multiprocessing.Queue()
         self.q_asr_cmd = multiprocessing.Queue()
         self.q_tts_text = multiprocessing.Queue()
+        self.q_llm_output = multiprocessing.Queue()  # New queue for LLM output separation
         self.q_event = multiprocessing.Queue()
         self.q_cmd_input = multiprocessing.Queue()
 
@@ -110,7 +112,7 @@ class VoiceAssistant:
             mock=mock_mode, enhancer=self.audio_enhancer,
             speaker_recognizer=self.speaker_recognizer
         )
-        self.p_llm = LLMEngine(self.q_llm_input, self.q_tts_text, mock=mock_mode)
+        self.p_llm = LLMEngine(self.q_llm_input, self.q_llm_output, mock=mock_mode)
         self.p_tts = TTSEngine(self.q_tts_text, self.q_event, audio_device_mock=mock_mode)
 
         self.is_recording = False
@@ -151,6 +153,8 @@ class VoiceAssistant:
     def run_loop(self):
         audio_dev = AudioDevice(mock=self.mock_mode)
         audio_dev.start_stream()
+        if self.message_board_handler:
+            self.message_board_handler.start_auto_cleanup()
 
         self._check_festival_reminders()
 
@@ -228,10 +232,14 @@ class VoiceAssistant:
 
                         if isinstance(asr_data, dict):
                             text = asr_data.get("text", "")
-                            emotion = asr_data.get("emotion", "neutral")
+                            # [MODIFIED] 优先使用主进程侦测到的实时情感，忽略 ASR 进程返回的 neutral 占位符
+                            # emotion = asr_data.get("emotion", "neutral")
+                            emotion = self.current_emotion if self.current_emotion else "neutral"
+                            
                             speaker = asr_data.get("speaker", "unknown")
                         elif isinstance(asr_data, str):
                             text = asr_data
+                            emotion = self.current_emotion if self.current_emotion else "neutral"
 
                         if text:
                             print(f"[Main] 识别文本: {text}")
@@ -248,104 +256,49 @@ class VoiceAssistant:
                                         self.current_speaker = "unknown"
                                         continue
 
-                            message_board_reply = None
-                            if self.message_board_handler:
-                                message_board_reply = self.message_board_handler.handle(text, speaker)
-
-                            if message_board_reply:
-                                print(f"[Main] 留言板回复: {message_board_reply}")
-                                self.q_tts_text.put(
-                                    {"text_chunk": message_board_reply, "end": True}
-                                )
-                            elif schedule_reply := self.schedule_handler.handle(text):
-                                if schedule_reply.startswith("PARTIAL_QUERY:"):
-                                    parts = schedule_reply.split(":", 3)
-                                    if len(parts) >= 4:
-                                        _, voice_text, total_str, displayed_str = parts
-                                        try:
-                                            total_count = int(total_str)
-                                            displayed_count = int(displayed_str)
-
-                                            self.dialog_state = "waiting_schedule_continue"
-                                            self.pending_schedule_data = {
-                                                "total_count": total_count,
-                                                "displayed_count": displayed_count,
-                                                "voice_text": voice_text
-                                            }
-
-                                            print(f"[Main] 部分日程查询回复: {voice_text}")
-                                            self.q_tts_text.put(
-                                                {"text_chunk": voice_text, "end": True}
-                                            )
-                                        except ValueError:
-                                            print(f"[Main] 日程管理回复: {schedule_reply}")
-                                            self.q_tts_text.put(
-                                                {"text_chunk": schedule_reply, "end": True}
-                                            )
-                                    else:
-                                        print(f"[Main] 日程管理回复: {schedule_reply}")
-                                        self.q_tts_text.put(
-                                            {"text_chunk": schedule_reply, "end": True}
-                                        )
-                                else:
-                                    print(f"[Main] 日程管理回复: {schedule_reply}")
+                            # 处理多轮对话状态（日程继续）
+                            if self.dialog_state == "waiting_schedule_continue":
+                                continue_reply = self._handle_schedule_continue(text)
+                                if continue_reply:
+                                    print(f"[Main] 日程继续回复: {continue_reply}")
                                     self.q_tts_text.put(
-                                        {"text_chunk": schedule_reply, "end": True}
+                                        {"text_chunk": continue_reply, "end": True}
                                     )
-                            elif weather_reply := self.weather_handler.handle(text):
-                                print(f"[Main] 天气查询回复: {weather_reply}")
-                                self.q_tts_text.put(
-                                    {"text_chunk": weather_reply, "end": True}
-                                )
-                            elif news_reply := self.news_handler.handle(text):
-                                print(f"[Main] 新闻查询回复: {news_reply}")
-                                self.q_tts_text.put(
-                                    {"text_chunk": news_reply, "end": True}
-                                )
-                            elif festival_reply := self.festival_handler.handle(text):
-                                print(f"[Main] 节日提醒回复: {festival_reply}")
-                                self.q_tts_text.put(
-                                    {"text_chunk": festival_reply, "end": True}
-                                )
-                            else:
-                                if self.dialog_state == "waiting_schedule_continue":
-                                    continue_reply = self._handle_schedule_continue(text)
-                                    if continue_reply:
-                                        print(f"[Main] 日程继续回复: {continue_reply}")
-                                        self.q_tts_text.put(
-                                            {"text_chunk": continue_reply, "end": True}
-                                        )
-                                        self.dialog_state = None
-                                        self.pending_schedule_data = {}
-                                    else:
-                                        packet = {
-                                            "text": text,
-                                            "emotion": emotion,
-                                            "speaker": speaker
-                                        }
-                                        self.q_llm_input.put(packet)
-                                else:
-                                    packet = {
-                                        "text": text,
-                                        "emotion": emotion,
-                                        "speaker": speaker
-                                    }
-                                    self.q_llm_input.put(packet)
+                                    self.dialog_state = None
+                                    self.pending_schedule_data = {}
+                                    self.current_emotion = "neutral"
+                                    self.current_speaker = "unknown"
+                                    continue
 
-                            self.current_emotion = "neutral"
-                            self.current_speaker = "unknown"
+                            # 发送给LLM进行意图分类
+                            packet = {
+                                "text": text,
+                                "emotion": emotion,
+                                "speaker": speaker
+                            }
+                            self.q_llm_input.put(packet)
+
+                            
+                            # (Removed: "TTS reading intent in advance" logic loop as requested)
+                            # We no longer wait here. The intent result will arrive in q_llm_output 
+                            # and be processed by _process_llm_output() in the main loop.
 
                 except queue.Empty:
                     pass
 
                 # ==========================
-                # 4. 状态流转 (THINKING -> SPEAKING)
+                # 4. 处理 LLM 返回结果（意图分类或聊天回复）
+                # ==========================
+                self._process_llm_output()
+
+                # ==========================
+                # 5. 状态流转 (THINKING -> SPEAKING)
                 # ==========================
                 if not self.q_tts_text.empty() and self.state == SystemState.THINKING:
                     self.switch_state(SystemState.SPEAKING)
 
                 # ==========================
-                # 5. 监听 TTS 播放结束
+                # 6. 监听 TTS 播放结束
                 # ==========================
                 while not self.q_event.empty():
                     evt = self.q_event.get()
@@ -361,6 +314,93 @@ class VoiceAssistant:
     def switch_state(self, s: SystemState):
         self.state = s
         self.led.set_state(s)
+
+    def _process_single_intent_result(self, llm_output):
+        """处理单个意图分类结果"""
+        try:
+            print(f"[Main] 检测到意图分类结果: {llm_output}")
+            intent_data = json.loads(llm_output["intent_result"])
+            intent = intent_data.get("intent")
+            text = intent_data.get("text")
+            emotion = intent_data.get("emotion", "neutral")
+            speaker = intent_data.get("speaker", "unknown")
+            
+            print(f"[Main] LLM意图分类: {intent}, 文本: {text}")
+            
+            # 根据意图调用对应的功能处理器
+            reply = None
+            if intent == "schedule":
+                reply = self.schedule_handler.handle(text)
+                if reply and reply.startswith("PARTIAL_QUERY:"):
+                    parts = reply.split(":", 3)
+                    if len(parts) >= 4:
+                        _, voice_text, total_str, displayed_str = parts
+                        try:
+                            total_count = int(total_str)
+                            displayed_count = int(displayed_str)
+                            self.dialog_state = "waiting_schedule_continue"
+                            self.pending_schedule_data = {
+                                "total_count": total_count,
+                                "displayed_count": displayed_count,
+                                "voice_text": voice_text
+                            }
+                            reply = voice_text
+                        except ValueError:
+                            pass
+            elif intent == "weather":
+                print(f"[Main] 调用天气处理器处理: {text}")
+                reply = self.weather_handler.handle(text)
+                print(f"[Main] 天气处理器返回: {reply}")
+            elif intent == "news":
+                print(f"[Main] 调用新闻处理器处理: {text}")
+                reply = self.news_handler.handle(text)
+                print(f"[Main] 新闻处理器返回: {reply}")
+            elif intent == "festival":
+                reply = self.festival_handler.handle(text)
+            elif intent == "message_board":
+                reply = self.message_board_handler.handle(text, speaker) if self.message_board_handler else None
+            
+            if reply:
+                print(f"[Main] 功能处理器回复: {reply}")
+                self.q_tts_text.put({"text_chunk": reply, "end": True})
+            else:
+                # 如果功能处理器没有返回结果，返回默认回复
+                print(f"[Main] 功能处理器无回复，返回默认提示")
+                default_reply = "抱歉，我没有理解您的意思，请再试一次。"
+                self.q_tts_text.put({"text_chunk": default_reply, "end": True})
+        except Exception as e:
+            print(f"[Main] 处理意图结果时出错: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _process_llm_output(self):
+        """处理LLM返回结果（意图分类或聊天回复），从 q_llm_output 读取"""
+        try:
+            # 检查队列中是否有数据
+            while not self.q_llm_output.empty():
+                try:
+                    llm_output = self.q_llm_output.get_nowait()
+                    
+                    # 检查是否是意图分类结果
+                    if "intent_result" in llm_output:
+                        self._process_single_intent_result(llm_output)
+                    else:
+                        # 正常的聊天回复chunk，直接转发给TTS
+                        # We forward it to TTS immediately, no need for buffering or putting back
+                        self.q_tts_text.put(llm_output)
+
+                except queue.Empty:
+                    break
+                except Exception as e:
+                    print(f"[Main] 处理单个LLM输出项时出错: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    break
+                        
+        except Exception as e:
+            print(f"[Main] 处理LLM输出时出错: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _build_reminder_text(self, item):
         """生成提醒话术"""

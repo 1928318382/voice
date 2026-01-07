@@ -18,6 +18,111 @@ os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 from TTS.api import TTS as CoquiTTS  # 来自 coqui-tts
 from .config import TTS_MODEL_PATH, TTS_CONFIG_PATH
 
+# ================= 数字转中文 =================
+
+CHINESE_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+CHINESE_UNITS = ['', '十', '百', '千']
+CHINESE_BIG_UNITS = ['', '万', '亿', '兆']
+
+def _number_to_chinese(num_str: str) -> str:
+    """将数字字符串转换为中文读法"""
+    if not num_str:
+        return ""
+    
+    # 处理小数
+    if '.' in num_str:
+        parts = num_str.split('.', 1)
+        integer_part = _integer_to_chinese(parts[0])
+        decimal_part = ''.join(CHINESE_DIGITS[int(d)] for d in parts[1] if d.isdigit())
+        return f"{integer_part}点{decimal_part}" if decimal_part else integer_part
+    
+    return _integer_to_chinese(num_str)
+
+def _integer_to_chinese(num_str: str) -> str:
+    """将整数字符串转换为中文"""
+    if not num_str:
+        return ""
+    
+    # 去除前导零
+    num_str = num_str.lstrip('0') or '0'
+    
+    if num_str == '0':
+        return '零'
+    
+    # 处理负数
+    if num_str.startswith('-'):
+        return '负' + _integer_to_chinese(num_str[1:])
+    
+    # 对于特别长的数字（如电话号码），逐位读出
+    if len(num_str) > 8:
+        return ''.join(CHINESE_DIGITS[int(d)] for d in num_str if d.isdigit())
+    
+    result = []
+    length = len(num_str)
+    
+    # 按4位一组处理
+    groups = []
+    while num_str:
+        groups.append(num_str[-4:])
+        num_str = num_str[:-4]
+    groups.reverse()
+    
+    for group_idx, group in enumerate(groups):
+        group_result = _four_digits_to_chinese(group)
+        if group_result:
+            big_unit_idx = len(groups) - group_idx - 1
+            if big_unit_idx < len(CHINESE_BIG_UNITS):
+                result.append(group_result + CHINESE_BIG_UNITS[big_unit_idx])
+            else:
+                result.append(group_result)
+    
+    return ''.join(result)
+
+def _four_digits_to_chinese(num_str: str) -> str:
+    """将4位以内的数字转换为中文"""
+    if not num_str:
+        return ""
+    
+    num_str = num_str.lstrip('0') or '0'
+    if num_str == '0':
+        return ''
+    
+    result = []
+    length = len(num_str)
+    has_zero = False
+    
+    for i, digit in enumerate(num_str):
+        d = int(digit)
+        unit_idx = length - i - 1
+        
+        if d == 0:
+            has_zero = True
+        else:
+            if has_zero:
+                result.append('零')
+                has_zero = False
+            # 特殊处理"一十"读作"十"
+            if not (d == 1 and unit_idx == 1 and i == 0):
+                result.append(CHINESE_DIGITS[d])
+            if unit_idx < len(CHINESE_UNITS):
+                result.append(CHINESE_UNITS[unit_idx])
+    
+    return ''.join(result)
+
+def _convert_numbers_in_text(text: str) -> str:
+    """将文本中的数字转换为中文读法"""
+    def replace_number(match):
+        num = match.group(0)
+        return _number_to_chinese(num)
+    
+    # 匹配整数和小数
+    # (?<!\d) 确保负号前不是数字（避免把 5-10 识别为 5 和 -10）
+    pattern = r'(?<!\d)-?\d+\.?\d*'
+    return re.sub(pattern, replace_number, text)
+
+# 句子最大长度（字符数），超过则分段
+MAX_SENTENCE_LENGTH = 80
+
 
 class TTSEngine(multiprocessing.Process):
     """
@@ -121,43 +226,113 @@ class TTSEngine(multiprocessing.Process):
 
     # ================= Coqui: 合成 -> 切除尾音 -> 播放 =================
 
+    def _split_long_text(self, text: str) -> list:
+        """
+        将长文本按句子边界分割，确保每段不超过 MAX_SENTENCE_LENGTH
+        """
+        # 先按标点分句
+        sentence_delimiters = r'([。！？!?…~；;]|\n)'
+        parts = re.split(sentence_delimiters, text)
+        
+        # 重新组合：[句子, 标点, 句子, 标点, ...]
+        sentences = []
+        current = ""
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+            if re.match(sentence_delimiters, part):
+                current += part
+                if current.strip():
+                    sentences.append(current.strip())
+                current = ""
+            else:
+                current = part
+        if current.strip():
+            sentences.append(current.strip())
+        
+        # 合并短句，拆分超长句
+        result = []
+        buffer = ""
+        
+        for sentence in sentences:
+            # 如果单个句子就超长，按逗号进一步拆分
+            if len(sentence) > MAX_SENTENCE_LENGTH:
+                if buffer:
+                    result.append(buffer)
+                    buffer = ""
+                # 按逗号拆分
+                sub_sentences = re.split(r'([，,、])', sentence)
+                sub_buffer = ""
+                for sub in sub_sentences:
+                    if len(sub_buffer) + len(sub) <= MAX_SENTENCE_LENGTH:
+                        sub_buffer += sub
+                    else:
+                        if sub_buffer:
+                            result.append(sub_buffer)
+                        sub_buffer = sub
+                if sub_buffer:
+                    result.append(sub_buffer)
+            elif len(buffer) + len(sentence) <= MAX_SENTENCE_LENGTH:
+                buffer += sentence
+            else:
+                if buffer:
+                    result.append(buffer)
+                buffer = sentence
+        
+        if buffer:
+            result.append(buffer)
+        
+        return result if result else [text]
+
     def _speak_coqui(self, tts: CoquiTTS, text: str):
         """
-        1. 文本预处理（加句号）
-        2. 合成 wav
-        3. 轻量后处理：削减尾部静音/杂音，避免削波失真
-        4. 播放
+        1. 长文本分段处理
+        2. 文本预处理（加句号）
+        3. 合成 wav
+        4. 轻量后处理：削减尾部静音/杂音，避免削波失真
+        5. 播放
         """
         
-        # 1. 强制添加标点，帮助模型停止
-        if not text.strip().endswith(("。", "！", "？", ".", "!", "?", "…", "~")):
-            text += "。"
+        # 分割长文本
+        segments = self._split_long_text(text)
+        print(f"[TTS] 文本分为 {len(segments)} 段处理")
+        
+        for idx, segment in enumerate(segments):
+            segment = segment.strip()
+            if not segment:
+                continue
+                
+            print(f"[TTS] 处理第 {idx + 1}/{len(segments)} 段: {segment[:50]}..." if len(segment) > 50 else f"[TTS] 处理第 {idx + 1}/{len(segments)} 段: {segment}")
+            
+            # 强制添加标点，帮助模型停止
+            if not segment.endswith(("。", "！", "？", ".", "!", "?", "…", "~")):
+                segment += "。"
 
-        # 2. 创建临时文件 (Windows 安全写法：先 close 再用)
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.close()
-            tmp_wav = f.name
+            # 创建临时文件 (Windows 安全写法：先 close 再用)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                f.close()
+                tmp_wav = f.name
 
-        try:
-            # 合成
-            tts.tts_to_file(text=text, file_path=tmp_wav)
-
-            # 3. 后处理：去除尾部静音/底噪
             try:
-                self._postprocess_wav(tmp_wav)
-            except Exception as e:
-                print(f"[TTS] 音频后处理失败 (将播放原声): {e}")
+                # 合成
+                tts.tts_to_file(text=segment, file_path=tmp_wav)
 
-            # 4. 播放
-            self._play_wav(tmp_wav)
-
-        finally:
-            # 5. 清理文件
-            if os.path.exists(tmp_wav):
+                # 后处理：去除尾部静音/底噪
                 try:
-                    os.remove(tmp_wav)
-                except OSError:
-                    pass
+                    self._postprocess_wav(tmp_wav)
+                except Exception as e:
+                    print(f"[TTS] 音频后处理失败 (将播放原声): {e}")
+
+                # 播放
+                self._play_wav(tmp_wav)
+
+            finally:
+                # 清理文件
+                if os.path.exists(tmp_wav):
+                    try:
+                        os.remove(tmp_wav)
+                    except OSError:
+                        pass
 
     def _play_wav(self, path: str):
         if self.mock:
@@ -179,8 +354,15 @@ class TTSEngine(multiprocessing.Process):
         """清洗文本以减少 TTS 词表缺失导致的异常发音。"""
         if not text:
             return ""
-        # 去掉英文/拼音/数字，保留中文和常见标点
-        text = re.sub(r"[A-Za-z0-9]+", " ", text)
+        
+        # [NEW] Convert newlines to sentence delimiters to preserve list structure
+        text = re.sub(r'\n+', '。', text)
+        
+        # 先将数字转换为中文读法
+        text = _convert_numbers_in_text(text)
+
+        # 去掉英文/拼音（保留中文和转换后的数字）
+        text = re.sub(r"[A-Za-z]+", " ", text)
         # 清理不常见符号
         text = re.sub(r"[^\u4e00-\u9fff，。！？、；：,.!?…~\s]", " ", text)
         # 统一空白

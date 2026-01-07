@@ -236,5 +236,19 @@
     "reminder_type": "text",
     "reminder_content": "生日提醒",
     "is_active": true
+  },
+  {
+    "id": "custom_17",
+    "name": "入团纪念日",
+    "type": "custom",
+    "date_type": "custom_date",
+    "month": null,
+    "day": null,
+    "lunar_month": null,
+    "lunar_day": null,
+    "custom_date": "2026-01-08",
+    "reminder_type": "text",
+    "reminder_content": "入团纪念日快乐！",
+    "is_active": true
   }
 ]

@@ -31,16 +31,33 @@ class WeatherCommandHandler:
         intent: Optional[Dict[str, Any]] = self.llm_parser.parse(text)
         city: Optional[str] = None
         days: int = 1
+        target_day: Optional[str] = None  # 用户实际想查询的日期：今天、明天、后天等
 
         if intent:
             city = (intent.get("city") or "").strip()
             days = int(intent.get("days") or 1)
-            print(f"[Weather] LLM解析结果: city='{city}', days={days}")  # 调试输出
+            # 判断用户实际想查询的日期
+            text_lower = text.lower()
+            if "明天" in text and "后天" not in text:
+                target_day = "明天"
+            elif "后天" in text:
+                target_day = "后天"
+            elif "今天" in text or ("今天" not in text and "明天" not in text and "后天" not in text):
+                target_day = "今天"
+            print(f"[Weather] LLM解析结果: city='{city}', days={days}, target_day={target_day}")  # 调试输出
         else:
             # 2. LLM 不可用或解析失败时，退回到本地规则
             city = self._extract_city(text)
             days = self._extract_days(text)
-            print(f"[Weather] LLM解析失败，退回本地规则: city='{city}', days={days}")  # 调试输出
+            # 判断用户实际想查询的日期
+            text_lower = text.lower()
+            if "明天" in text and "后天" not in text:
+                target_day = "明天"
+            elif "后天" in text:
+                target_day = "后天"
+            else:
+                target_day = "今天"
+            print(f"[Weather] LLM解析失败，退回本地规则: city='{city}', days={days}, target_day={target_day}")  # 调试输出
 
         if not city:
             # 没提城市时，可以默认一个城市或提示用户
@@ -50,9 +67,24 @@ class WeatherCommandHandler:
         if not forecasts:
             return f"暂时没有查到{city}的天气信息，请稍后再试。"
 
+        # 根据用户实际想查询的日期，从forecasts中选择对应的数据
+        selected_forecasts = []
+        if target_day == "明天" and len(forecasts) >= 2:
+            # 用户查询明天，取第二个（索引1）
+            selected_forecasts = [forecasts[1]]
+        elif target_day == "后天" and len(forecasts) >= 3:
+            # 用户查询后天，取第三个（索引2）
+            selected_forecasts = [forecasts[2]]
+        elif target_day == "今天" or len(forecasts) == 1:
+            # 用户查询今天，取第一个（索引0），或者只有一天数据
+            selected_forecasts = [forecasts[0]]
+        else:
+            # 其他情况，返回所有查询到的数据
+            selected_forecasts = forecasts
+
         # 组装播报文本
         lines = []
-        for f in forecasts:
+        for f in selected_forecasts:
             line = (
                 f"{f.date}，白天{f.text_day}，夜间{f.text_night}，"
                 f"最高气温{f.high}度，最低气温{f.low}度，"
@@ -60,10 +92,16 @@ class WeatherCommandHandler:
             )
             lines.append(line)
 
-        if len(forecasts) == 1:
-            prefix = f"{city}今天的天气是："
+        # 根据选择的日期生成前缀
+        if len(selected_forecasts) == 1:
+            if target_day == "明天":
+                prefix = f"{city}明天的天气是："
+            elif target_day == "后天":
+                prefix = f"{city}后天的天气是："
+            else:
+                prefix = f"{city}今天的天气是："
         else:
-            prefix = f"{city}未来{len(forecasts)}天的天气是："
+            prefix = f"{city}未来{len(selected_forecasts)}天的天气是："
 
         return prefix + " ".join(lines)
 

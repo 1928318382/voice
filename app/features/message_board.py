@@ -149,3 +149,10 @@ class MessageBoardCommandHandler:
             print(f"[MessageBoard] 发送留言失败: {e}")
             return "抱歉，发送留言时出现错误。"
 
+    def start_auto_cleanup(self):
+        """Starts the auto-cleanup thread in the underlying manager"""
+        try:
+            self.manager.start_auto_cleanup()
+        except AttributeError:
+            pass  # manager might not have auto_cleanup or method name differs
+

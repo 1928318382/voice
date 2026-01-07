@@ -138,6 +138,7 @@ dependencies = [
     "soundfile==0.13.1",
     "soxr==1.0.0",
     "spacy-pkuseg==1.0.1",
+    "speechbrain>=1.0.3",
     "srsly==2.5.2",
     "sympy==1.14.0",
     "tensorboard==2.20.0",

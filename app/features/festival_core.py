@@ -233,12 +233,22 @@ class FestivalLLMParser:
         system_prompt = (
             "你是一个节日提醒助手，请解析用户关于节日的指令。\n"
             "用户可能想添加自定义节日、修改提醒方式，或查询节日信息。\n"
+            "\n"
+            "节日类型包括：传统节日、生日、纪念日（如入团纪念日、结婚纪念日等）、周年纪念等。\n"
+            "\n"
             "返回JSON格式：\n"
             '{"intent": "add_custom" | "update_reminder" | "query_festivals", \n'
-            ' "festival_name": "节日名称", \n'
-            ' "date": "YYYY-MM-DD格式的日期", \n'
+            ' "festival_name": "节日名称（如：入团纪念日、我的生日等）", \n'
+            ' "date": "YYYY-MM-DD格式的日期（如：2026-01-08）", \n'
             ' "reminder_type": "text" | "song" | "poem" | "custom", \n'
-            ' "reminder_content": "提醒内容或歌词等"}'
+            ' "reminder_content": "提醒内容或歌词等"}\n'
+            "\n"
+            "示例：\n"
+            "输入：\"一月八号是一个特殊的日子它是我的入团纪念日把一月八号设定为我的入团纪念日\"\n"
+            "输出：{\"intent\": \"add_custom\", \"festival_name\": \"入团纪念日\", \"date\": \"2026-01-08\", \"reminder_type\": \"text\"}\n"
+            "\n"
+            "输入：\"添加我的生日，日期是1990-05-15\"\n"
+            "输出：{\"intent\": \"add_custom\", \"festival_name\": \"我的生日\", \"date\": \"1990-05-15\", \"reminder_type\": \"text\"}"
         )
 
         user_prompt = f"请解析这句话的节日相关意图：{text}"

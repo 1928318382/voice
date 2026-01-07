@@ -60,7 +60,93 @@ class FestivalCommandHandler:
         if any(keyword in text_lower for keyword in ["节日", "节日提醒", "有哪些节日"]):
             return self._handle_query_festivals()
 
-        if any(keyword in text_lower for keyword in ["添加节日", "自定义节日", "新建节日"]):
+        # 检查是否包含纪念日、生日等关键词
+        if any(keyword in text_lower for keyword in ["纪念日", "生日", "周年"]):
+            # 尝试解析并添加自定义节日
+            # 提取日期和名称
+            import re
+            from datetime import datetime
+            
+            # 中文数字映射
+            cn_num_map = {
+                "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+                "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15, "十六": 16, "十七": 17, "十八": 18, "十九": 19, "二十": 20,
+                "二十一": 21, "二十二": 22, "二十三": 23, "二十四": 24, "二十五": 25, "二十六": 26, "二十七": 27, "二十八": 28, "二十九": 29, "三十": 30, "三十一": 31
+            }
+            
+            # 尝试提取日期（如：一月八号、1月8日、2026-01-08等）
+            date_str = None
+            year = datetime.now().year  # 默认使用当前年份
+            
+            # 先尝试提取完整日期（包含年份）
+            full_date_match = re.search(r"(\d{4})[-年](\d{1,2}|[一二三四五六七八九十]+)[-月](\d{1,2}|[一二三四五六七八九十]+)[日号]?", text)
+            if full_date_match:
+                year = int(full_date_match.group(1))
+                month_str = full_date_match.group(2)
+                day_str = full_date_match.group(3)
+                
+                # 转换月份
+                if month_str in cn_num_map:
+                    month = cn_num_map[month_str]
+                else:
+                    month = int(month_str)
+                
+                # 转换日期
+                if day_str in cn_num_map:
+                    day = cn_num_map[day_str]
+                else:
+                    day = int(day_str)
+                
+                date_str = f"{year}-{month:02d}-{day:02d}"
+            else:
+                # 尝试提取只有月日的日期
+                month_day_match = re.search(r"(\d{1,2}|[一二三四五六七八九十]+)月(\d{1,2}|[一二三四五六七八九十]+)[日号]", text)
+                if month_day_match:
+                    month_str = month_day_match.group(1)
+                    day_str = month_day_match.group(2)
+                    
+                    # 转换月份
+                    if month_str in cn_num_map:
+                        month = cn_num_map[month_str]
+                    else:
+                        month = int(month_str)
+                    
+                    # 转换日期
+                    if day_str in cn_num_map:
+                        day = cn_num_map[day_str]
+                    else:
+                        day = int(day_str)
+                    
+                    date_str = f"{year}-{month:02d}-{day:02d}"
+            
+            # 提取名称（纪念日、生日等）
+            name = None
+            if "入团" in text and "纪念日" in text:
+                name = "入团纪念日"
+            elif "生日" in text:
+                name = "我的生日"
+            elif "纪念日" in text:
+                # 尝试提取纪念日名称
+                name_match = re.search(r"(.+?)纪念日", text)
+                if name_match:
+                    name = name_match.group(1).strip() + "纪念日"
+                else:
+                    name = "纪念日"
+            
+            if name and date_str:
+                try:
+                    return self._handle_add_custom_festival(name, date_str)
+                except Exception as e:
+                    print(f"[Festival] 添加节日失败: {e}")
+            
+            # 如果无法解析，提示用户
+            return "请告诉我节日名称和日期，比如：添加我的生日，日期是2026-01-08"
+
+        if any(keyword in text_lower for keyword in ["添加节日", "自定义节日", "新建节日", "设定", "设定为"]):
+            # 检查是否包含日期和名称
+            if "纪念日" in text or "生日" in text:
+                # 尝试解析
+                return self._handle_simple_keywords(text)  # 递归调用上面的逻辑
             return "请告诉我节日名称和日期，比如：添加春节，日期是2026-02-17"
 
         if any(keyword in text_lower for keyword in ["设置提醒", "修改提醒", "提醒方式"]):

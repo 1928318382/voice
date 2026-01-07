@@ -1,24 +1,10 @@
 import os
 import pickle
 import numpy as np
-import logging
 from typing import Dict, List, Optional, Tuple
-
-# 在导入其他库之前设置环境变量禁用DEBUG日志
-os.environ['SPEECHBRAIN_LOG_LEVEL'] = 'WARNING'
-os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
-
 import torch
 import torchaudio
-from torchaudio.transforms import MFCC, MelSpectrogram, Spectrogram
 from sklearn.metrics.pairwise import cosine_similarity
-
-# 禁用各种库的DEBUG日志
-logging.getLogger('speechbrain').setLevel(logging.WARNING)
-logging.getLogger('speechbrain.utils.checkpoints').setLevel(logging.WARNING)
-logging.getLogger('speechbrain.utils').setLevel(logging.WARNING)
-logging.getLogger('huggingface_hub').setLevel(logging.WARNING)
-logging.getLogger('transformers').setLevel(logging.WARNING)
 from app.core.config import (
     SPEAKER_MODEL_PATH, SPEAKER_EMBEDDING_DIM, SPEAKER_SAMPLE_RATE,
     SPEAKER_SIMILARITY_THRESHOLD, SPEAKER_DATABASE_PATH,
@@ -49,73 +35,28 @@ class ECAPATDNNRecognizer:
     def _load_model(self):
         """加载ECAPA-TDNN模型"""
         try:
-            # 进一步禁用SpeechBrain日志输出
-            import logging
-            logging.getLogger('speechbrain.utils.checkpoints').setLevel(logging.ERROR)
-            logging.getLogger('speechbrain.utils.training').setLevel(logging.ERROR)
-            logging.getLogger('speechbrain.utils.epoch_loop').setLevel(logging.ERROR)
-
             # 检查是否已安装speechbrain
             try:
-                from speechbrain.pretrained import SpeakerRecognition
+                from speechbrain.inference import SpeakerRecognition
                 has_speechbrain = True
             except ImportError:
-                has_speechbrain = False
-                print("[Speaker] SpeechBrain未安装，使用简化实现")
+                try:
+                     # try old import path for backwards compatibility
+                    from speechbrain.pretrained import SpeakerRecognition
+                    has_speechbrain = True
+                except ImportError:
+                    has_speechbrain = False
+                    print("[Speaker] SpeechBrain未安装，使用简化实现")
 
             if has_speechbrain and SPEAKER_MODEL_SOURCE == "speechbrain":
                 print("[Speaker] 正在从SpeechBrain加载ECAPA-TDNN模型...")
-
-                # 临时禁用所有日志输出
-                import logging
-                old_level = logging.getLogger().level
-                logging.getLogger().setLevel(logging.ERROR)
-
-                # 重定向stdout来屏蔽SpeechBrain的输出
-                import sys
-                from contextlib import redirect_stdout, redirect_stderr
-                import io
-
-                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    self.model = SpeakerRecognition.from_hparams(
-                        source="speechbrain/spkrec-ecapa-voxceleb",
-                        savedir=SPEAKER_MODEL_PATH,
-                        run_opts={"device": self.device}
-                    )
-
-                # 恢复日志级别
-                logging.getLogger().setLevel(old_level)
-
+                # Suppress warnings if needed, but keeping simple for now
+                self.model = SpeakerRecognition.from_hparams(
+                    source="speechbrain/spkrec-ecapa-voxceleb",
+                    savedir=SPEAKER_MODEL_PATH,
+                    run_opts={"device": self.device}
+                )
                 print("[Speaker] ECAPA-TDNN模型加载成功")
-
-            elif SPEAKER_MODEL_SOURCE == "modelscope":
-                print("[Speaker] 正在从ModelScope加载ECAPA-TDNN模型...")
-                try:
-                    # 使用ModelScope下载和加载模型
-                    from modelscope.pipelines import pipeline
-                    from modelscope.utils.constant import Tasks
-
-                    # 创建声纹识别pipeline
-                    self.model = pipeline(
-                        Tasks.speaker_verification,
-                        model='damo/speech_ecapa-tdnn_sv_en_voxceleb_16k',
-                        model_revision='v1.0.0'
-                    )
-                    print("[Speaker] ModelScope ECAPA-TDNN模型加载成功")
-
-                except ImportError:
-                    print("[Speaker] ModelScope未安装，切换到简化实现")
-                    self.model = None
-                except Exception as e:
-                    print(f"[Speaker] ModelScope模型加载失败: {e}")
-                    print("[Speaker] 切换到简化实现")
-                    self.model = None
-
-            elif SPEAKER_MODEL_SOURCE == "local":
-                print("[Speaker] 尝试加载本地模型...")
-                # 这里可以添加本地模型加载逻辑
-                self.model = None
-
             else:
                 print("[Speaker] 使用简化声纹识别实现 (无预训练模型)")
                 self.model = None
@@ -170,43 +111,11 @@ class ECAPATDNNRecognizer:
     def _extract_embedding(self, audio_tensor: torch.Tensor) -> np.ndarray:
         """提取声纹特征"""
         if self.model is not None:
+            # 使用真实的ECAPA-TDNN模型
             try:
-                # 检查模型类型
-                if SPEAKER_MODEL_SOURCE == "speechbrain":
-                    # SpeechBrain模型
-                    with torch.no_grad():
-                        embedding = self.model.encode_batch(audio_tensor)
-                        embedding = embedding.squeeze().cpu().numpy()
-
-                elif SPEAKER_MODEL_SOURCE == "modelscope":
-                    # ModelScope模型 - 需要转换为numpy数组并调整格式
-                    audio_np = audio_tensor.squeeze().cpu().numpy()
-
-                    # ModelScope pipeline需要音频文件路径或特定的输入格式
-                    # 这里使用临时文件方式
-                    import tempfile
-                    import soundfile as sf
-
-                    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                        sf.write(f.name, audio_np, SPEAKER_SAMPLE_RATE)
-                        temp_path = f.name
-
-                    try:
-                        # 使用ModelScope pipeline进行推理
-                        result = self.model(temp_path)
-                        # ModelScope返回的结果格式可能需要调整
-                        if isinstance(result, dict) and 'embedding' in result:
-                            embedding = np.array(result['embedding'])
-                        else:
-                            # 如果返回格式不同，使用备用方法
-                            raise ValueError("ModelScope返回格式不支持")
-
-                    finally:
-                        import os
-                        os.unlink(temp_path)
-
-                else:
-                    raise ValueError(f"不支持的模型源: {SPEAKER_MODEL_SOURCE}")
+                with torch.no_grad():
+                    embedding = self.model.encode_batch(audio_tensor)
+                    embedding = embedding.squeeze().cpu().numpy()
 
                 # 归一化
                 embedding = embedding / np.linalg.norm(embedding)
@@ -220,40 +129,22 @@ class ECAPATDNNRecognizer:
             return self._extract_embedding_simple(audio_tensor)
 
     def _extract_embedding_simple(self, audio_tensor: torch.Tensor) -> np.ndarray:
-        """简化的声纹特征提取（用于无模型情况）- 使用torchaudio 2.3.0"""
+        """简化的声纹特征提取（用于无模型情况）"""
         try:
-            # 使用torchaudio 2.3.0计算MFCC特征
-            # torchaudio.transforms.MFCC在新版本中有一些API变化
-            from torchaudio.transforms import MFCC
+            audio_np = audio_tensor.squeeze().numpy()
 
-            # 创建MFCC变换器
-            mfcc_transform = MFCC(
-                sample_rate=SPEAKER_SAMPLE_RATE,
+            # 计算MFCC特征作为简化版本
+            import librosa
+            mfcc = librosa.feature.mfcc(
+                y=audio_np,
+                sr=SPEAKER_SAMPLE_RATE,
                 n_mfcc=40,
-                melkwargs={
-                    "n_fft": 1024,
-                    "hop_length": 512,
-                    "n_mels": 40,
-                    "f_min": 0,
-                    "f_max": SPEAKER_SAMPLE_RATE // 2
-                }
+                n_fft=1024,
+                hop_length=512
             )
 
-            # 确保音频是正确的形状 [channels, time]
-            if audio_tensor.dim() == 1:
-                audio_tensor = audio_tensor.unsqueeze(0)
-
-            # 计算MFCC特征
-            mfcc = mfcc_transform(audio_tensor)
-
-            # 取平均值作为embedding (沿着时间维度平均)
-            embedding = torch.mean(mfcc, dim=-1).squeeze().numpy()
-
-            # 如果是标量，转为数组
-            if np.isscalar(embedding):
-                embedding = np.array([embedding])
-            elif isinstance(embedding, np.ndarray) and embedding.ndim == 0:
-                embedding = np.array([embedding.item()])
+            # 取平均值作为embedding
+            embedding = np.mean(mfcc, axis=1)
 
             # 归一化到固定维度
             if len(embedding) < SPEAKER_EMBEDDING_DIM:
@@ -265,14 +156,12 @@ class ECAPATDNNRecognizer:
                 embedding = embedding[:SPEAKER_EMBEDDING_DIM]
 
             # L2归一化
-            norm = np.linalg.norm(embedding)
-            if norm > 0:
-                embedding = embedding / norm
+            embedding = embedding / np.linalg.norm(embedding)
 
             return embedding
 
         except Exception as e:
-            print(f"[Speaker] torchaudio特征提取失败: {e}")
+            print(f"[Speaker] 简化特征提取失败: {e}")
             # 返回随机向量作为fallback
             return np.random.randn(SPEAKER_EMBEDDING_DIM)
 
