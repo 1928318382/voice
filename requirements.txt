@@ -3,26 +3,25 @@ numpy
 scipy
 numba
 soundfile
-librosa
+librosa>=0.10.0
 anyascii
 typing_extensions
+pandas
 
-# ===== Coqui TTS（新维护的 fork，不用老的 TTS 包）=====
+# ===== Coqui TTS =====
 coqui-tts
 coqpit-config
 coqui-tts[zh]
+
 # ===== ASR：FunASR + ModelScope =====
 funasr
 modelscope
 onnxruntime
 
-# ===== 录音 / 播放（按需选一个）=====
-# Windows 上：
+# ===== 录音 / 播放（Windows）=====
 pyaudio
-# 或者跨平台：
-sounddevice
 
-# ===== 备用 TTS（系统自带声音，做 fallback 用，不想要可以删）=====
+# ===== 备用 TTS =====
 pyttsx3
 
 # ===== LLM / HTTP 调用 =====
@@ -30,20 +29,16 @@ requests
 openai
 
 # ===== 语音增强相关 =====
-noisereduce>=3.0.0        # 经典降噪库
-webrtcvad>=2.0.10         # 语音活动检测
-rnnoise-python>=1.0.0     # RNNoise降噪库
-librosa>=0.10.0           # 音频处理 (已有)
-scipy>=1.10.0             # 信号处理 (已有)
+noisereduce>=3.0.0
+webrtcvad>=2.0.10
+# rnnoise-python 从GitHub安装（替代PyPI）下载不下来
 
-# ===== 声纹识别相关 =====
-speechbrain>=0.5.16       # SpeechBrain框架 (ECAPA-TDNN)
-torch>=2.0.0              # PyTorch
-torchaudio>=2.0.0         # 音频处理
-scikit-learn>=1.3.0       # 相似度计算
-huggingface-hub>=0.17.0   # HuggingFace模型下载
+# ===== 声纹识别相关（指定兼容版本）=====
+speechbrain>=0.5.16
+torch==2.3.0+cu121
+torchaudio==2.3.0+cu121
+scikit-learn>=1.3.0
+huggingface-hub>=0.17.0
 
-# ===== 杂项（日志、配置等，一般 stdlib 就够，这里不额外加）=====
-pandas
-modelscope
-tensorflow
+# ===== 可选：TensorFlow（兼容版本）=====
+tensorflow>=2.10.0,<2.15.0

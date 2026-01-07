@@ -1,0 +1,44 @@
+{
+  "messages": [
+    {
+      "id": "617659b0-fbc7-44b9-a20c-3888f87d6933",
+      "sender": "user_a",
+      "receiver": "user_b",
+      "content": "测试留言1",
+      "timestamp": "2026-01-07T02:43:44.303713",
+      "read": true
+    },
+    {
+      "id": "71fafd73-aa69-4031-84a9-a7bbec0d1def",
+      "sender": "user_c",
+      "receiver": "user_b",
+      "content": "测试留言2",
+      "timestamp": "2026-01-07T02:43:44.305396",
+      "read": true
+    },
+    {
+      "id": "55c31d91-494c-4eb8-9290-6e17ae533cfa",
+      "sender": "user_a",
+      "receiver": "user_b",
+      "content": "你好",
+      "timestamp": "2026-01-07T02:43:44.306951",
+      "read": true
+    },
+    {
+      "id": "99b6a49c-210a-4d6b-9dcc-a78702b8cfac",
+      "sender": "alice",
+      "receiver": "bob",
+      "content": "记得吃药",
+      "timestamp": "2026-01-07T02:43:46.551796",
+      "read": true
+    },
+    {
+      "id": "322be999-d903-4a66-b799-74625707482f",
+      "sender": "bob",
+      "receiver": "alice",
+      "content": "好的，谢谢",
+      "timestamp": "2026-01-07T02:43:46.553387",
+      "read": false
+    }
+  ]
+}

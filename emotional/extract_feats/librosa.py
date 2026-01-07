@@ -13,8 +13,6 @@ import joblib
 import emotional.utils as utils
 
 def features(X, sample_rate: float) -> np.ndarray:
-    # 极端情况：全静音/接近静音会导致部分特征出现除零、log(0) 等，从而产生 NaN/Inf
-    # 这里尽量在特征层面兜底，保证下游 sklearn 模型不会因 NaN 报错。
     stft = np.abs(librosa.stft(X))
 
     # fmin 和 fmax 对应于人类语音的最小最大基本频率
@@ -25,8 +23,6 @@ def features(X, sample_rate: float) -> np.ndarray:
         pitch.append(pitches[index, i])
 
     pitch_tuning_offset = librosa.pitch_tuning(pitches)
-    if not np.isfinite(pitch_tuning_offset):
-        pitch_tuning_offset = 0.0
     pitchmean = np.mean(pitch)
     pitchstd = np.std(pitch)
     pitchmax = np.max(pitch)
@@ -34,10 +30,7 @@ def features(X, sample_rate: float) -> np.ndarray:
 
     # 频谱质心
     cent = librosa.feature.spectral_centroid(y=X, sr=sample_rate)
-    cent_sum = float(np.sum(cent))
-    if not np.isfinite(cent_sum) or cent_sum == 0.0:
-        cent_sum = 1.0
-    cent = cent / cent_sum
+    cent = cent / np.sum(cent)
     meancent = np.mean(cent)
     stdcent = np.std(cent)
     maxcent = np.max(cent)
@@ -81,7 +74,6 @@ def features(X, sample_rate: float) -> np.ndarray:
     ])
 
     ext_features = np.concatenate((ext_features, mfccs, mfccsstd, mfccmax, chroma, mel, contrast))
-    ext_features = np.nan_to_num(ext_features, nan=0.0, posinf=0.0, neginf=0.0)
 
     return ext_features
 
