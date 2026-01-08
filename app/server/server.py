@@ -191,7 +191,10 @@ class VoiceServer:
         }
         
         if not audio_data or len(audio_data) < 1920:  # 至少 0.06 秒
+            print(f"[Server] ⚠️ 接收到的音频数据太短: {len(audio_data)} bytes")
             return result
+        
+        print(f"[Server] 接收到音频数据: {len(audio_data)} bytes")
         
         # 语音增强
         if self.audio_enhancer:
@@ -225,12 +228,15 @@ class VoiceServer:
                     sf.write(f.name, audio_np, SAMPLE_RATE)
                     tmp_file = f.name
                 
+                print(f"[Server]DEBUG ASR临时文件已保存: {tmp_file}, 数据形状: {audio_np.shape}, 采样率: {SAMPLE_RATE}")
+
                 try:
                     res = self.asr_model.generate(
                         input=tmp_file, 
                         batch_size_s=300, 
                         disable_pbar=True
                     )
+                    print(f"[Server]DEBUG ASR原始结果: {res}")
                     
                     if isinstance(res, list) and len(res) > 0:
                         result["text"] = res[0].get("text", "")
@@ -246,13 +252,15 @@ class VoiceServer:
                         
             except Exception as e:
                 print(f"[Server] ASR 识别失败: {e}")
+                import traceback
+                traceback.print_exc()
         
         return result
 
     # ==================== LLM 处理 ====================
     
-    def process_llm(self, text: str, emotion: str = "neutral", speaker: str = "unknown") -> str:
-        """调用 LLM 生成回复"""
+    def _generate_chat_response(self, text: str, emotion: str = "neutral", speaker: str = "unknown") -> str:
+        """调用 LLM 生成 闲聊 回复 (原 process_llm)"""
         if not self.llm_client:
             return "抱歉，语言模型未就绪。"
         
@@ -286,19 +294,96 @@ class VoiceServer:
             print(f"[Server] LLM 调用失败: {e}")
             return "抱歉，我的大脑连接有点问题。"
 
+    def classify_intent(self, user_text: str) -> str:
+        """使用LLM对用户输入进行意图分类"""
+        if not self.llm_client:
+            print("[Server] LLM未初始化，无法进行意图分类，默认chat")
+            return "chat"
+
+        from app.core.config import LLM_MODEL_NAME
+        
+        classification_prompt = (
+            "你是一个意图分类助手。请仔细分析用户的输入，准确判断用户想要执行什么操作。\n\n"
+            "可选的功能类型及判断标准：\n\n"
+            "1. schedule（日程管理）：\n"
+            "   - 明确包含：添加、记录、提醒、安排、查看、查询、删除、修改日程等动作\n"
+            "   - 包含时间信息：明天、后天、早上、晚上、几点等\n"
+            "   - 包含日程相关词：日程、提醒、安排、吃药、睡觉、起床、待办、任务等\n"
+            "   - 示例：\"记一下明天早上8点开会\"、\"帮我提醒晚上10点睡觉\"、\"查看我的日程\"、\"删除编号3的日程\"、\"明天下午3点写报告\"\n"
+            "   - 注意：如果包含\"纪念日\"、\"生日\"、\"节日\"等词，应该归类为festival，而不是schedule\n\n"
+            "2. weather（天气查询）：\n"
+            "   - 明确包含\"天气\"关键词\n"
+            "   - 包含城市名称和天气相关词\n"
+            "   - 示例：\"今天天气怎么样\"、\"北京未来三天天气\"、\"上海天气\"、\"明天会下雨吗\"\n\n"
+            "3. news（新闻查询）：\n"
+            "   - 明确包含：新闻、小贴士、建议、tip等关键词\n"
+            "   - 示例：\"有什么新闻\"、\"看新闻\"、\"生活小贴士\"、\"职场建议\"、\"给我一些生活建议\"\n\n"
+            "4. festival（节日提醒）：\n"
+            "   - 明确包含：节日、节日提醒、添加节日、纪念日、生日、周年纪念等\n"
+            "   - 包含\"纪念日\"、\"生日\"、\"节日\"等关键词，且用户想要设定或添加\n"
+            "   - 示例：\"有哪些节日\"、\"添加节日\"、\"节日提醒\"、\"什么时候是春节\"、\"把一月八号设定为我的入团纪念日\"、\"添加我的生日\"、\"设定纪念日\"\n"
+            "   - 注意：如果用户说\"设定XX纪念日\"、\"添加XX节日\"，应该归类为festival，而不是schedule\n\n"
+            "5. message_board（留言板）：\n"
+            "   - 明确包含：留言、查看留言、给XX留言等\n"
+            "   - 示例：\"查看留言\"、\"给张三留言你好\"、\"我的留言\"、\"有留言吗\"\n\n"
+            "6. chat（正常聊天）：\n"
+            "   - 普通对话、问候、提问、闲聊、知识问答等\n"
+            "   - 不涉及上述任何功能操作\n"
+            "   - 示例：\"你好\"、\"今天心情不错\"、\"给我讲个笑话\"、\"什么是人工智能\"、\"谢谢\"、\"再见\"\n\n"
+            "重要判断规则：\n"
+            "- 必须明确包含功能相关的关键词或动作，才返回功能类型\n"
+            "- 如果只是提到相关词但没有明确的操作意图，返回chat（例如：\"今天天气真好\"是聊天，不是查询天气）\n"
+            "- 如果同时包含功能意图和聊天内容，优先返回功能类型\n"
+            "- 如果无法确定或模糊不清，返回chat\n"
+            "- 问候语、感谢、告别等社交用语，返回chat\n\n"
+            "请只返回一个单词：schedule、weather、news、festival、message_board 或 chat，不要返回其他内容，不要解释。"
+        )
+
+        messages = [
+            {"role": "system", "content": classification_prompt},
+            {"role": "user", "content": user_text}
+        ]
+
+        try:
+            # 简化版超时处理，server端通常网络较好，或者直接依赖 client timeout
+            # 这里简单设置 API timeout
+            response = self.llm_client.chat.completions.create(
+                model=LLM_MODEL_NAME,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=10,
+                timeout=5.0
+            )
+            
+            intent = response.choices[0].message.content.strip().lower()
+            intent = intent.replace("。", "").replace(".", "").replace("\n", "").strip()
+            
+            valid_intents = ["schedule", "weather", "news", "festival", "message_board", "chat"]
+            if intent not in valid_intents:
+                print(f"[Server] 分类结果无效: {intent}，默认返回chat")
+                return "chat"
+            
+            return intent
+            
+        except Exception as e:
+            print(f"[Server] 意图分类失败: {e}，默认返回chat")
+            return "chat"
+
+
     # ==================== TTS 处理 ====================
     
     def process_tts(self, text: str) -> Optional[bytes]:
-        """将文本转换为语音，返回 WAV 数据"""
-        if not self.tts_engine or not text:
+        """使用 Edge TTS 将文本转换为语音，返回 WAV 数据"""
+        if not text:
             return None
         
         try:
+            import edge_tts
+            import asyncio
             import re
             
-            # 文本清洗
-            text = re.sub(r"[A-Za-z0-9]+", " ", text)
-            text = re.sub(r"[^\u4e00-\u9fff，。！？、；：,.!?…~\s]", " ", text)
+            # 文本清洗（保留中英文）
+            text = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9，。！？、；：,.!?…~\s]", " ", text)
             text = re.sub(r"\s+", " ", text).strip()
             
             if not text:
@@ -308,68 +393,158 @@ class VoiceServer:
             if not text.endswith(("。", "！", "？", ".", "!", "?", "…", "~")):
                 text += "。"
             
-            # 合成到临时文件
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                tmp_file = f.name
+            # 使用 Edge TTS 合成
+            # 中文女声推荐: zh-CN-XiaoxiaoNeural, zh-CN-XiaoyiNeural
+            # 中文男声推荐: zh-CN-YunxiNeural, zh-CN-YunjianNeural
+            voice = "zh-CN-XiaoxiaoNeural"
+            
+            # 创建临时文件
+            mp3_file = tempfile.mktemp(suffix=".mp3")
+            wav_file = tempfile.mktemp(suffix=".wav")
             
             try:
-                self.tts_engine.tts_to_file(text=text, file_path=tmp_file)
+                # Edge TTS 是异步的，需要在事件循环中运行
+                async def synthesize():
+                    communicate = edge_tts.Communicate(text, voice)
+                    await communicate.save(mp3_file)
+                
+                # 创建新的事件循环运行
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(synthesize())
+                finally:
+                    loop.close()
+                
+                # 转换 MP3 到 WAV (使用 ffmpeg 或 sox)
+                import subprocess
+                result = subprocess.run([
+                    "ffmpeg", "-y", "-i", mp3_file,
+                    "-ar", "16000", "-ac", "1", "-acodec", "pcm_s16le",
+                    wav_file
+                ], capture_output=True, timeout=30)
+                
+                if result.returncode != 0:
+                    # 尝试使用 sox
+                    subprocess.run([
+                        "sox", mp3_file, "-r", "16000", "-c", "1", wav_file
+                    ], capture_output=True, timeout=30)
                 
                 # 读取 WAV 数据
-                with open(tmp_file, "rb") as f:
-                    wav_data = f.read()
-                
-                return wav_data
-                
+                if os.path.exists(wav_file):
+                    with open(wav_file, "rb") as f:
+                        wav_data = f.read()
+                    print(f"[TTS] Edge TTS 合成成功: {len(wav_data)} bytes")
+                    return wav_data
+                else:
+                    print("[TTS] WAV 文件生成失败")
+                    return None
+                    
             finally:
-                if os.path.exists(tmp_file):
-                    os.remove(tmp_file)
+                # 清理临时文件
+                for f in [mp3_file, wav_file]:
+                    if os.path.exists(f):
+                        try:
+                            os.remove(f)
+                        except:
+                            pass
                     
         except Exception as e:
-            print(f"[Server] TTS 合成失败: {e}")
+            print(f"[TTS] Edge TTS 合成失败: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     # ==================== 功能处理 ====================
     
-    def handle_features(self, text: str, speaker: str = "unknown") -> Optional[str]:
-        """处理功能命令，返回回复文本或 None"""
+    def handle_features_by_intent(self, intent: str, text: str, speaker: str = "unknown", client: Dict = None) -> Optional[str]:
+        """根据意图处理功能命令"""
         
-        # 留言板
-        if self.message_board_handler:
+        reply = None
+        
+        if intent == "message_board" and self.message_board_handler:
             reply = self.message_board_handler.handle(text, speaker)
-            if reply:
-                return reply
-        
-        # 日程管理
-        if self.schedule_handler:
+        elif intent == "schedule" and self.schedule_handler:
             reply = self.schedule_handler.handle(text)
-            if reply:
-                # 处理 PARTIAL_QUERY 前缀
-                if reply.startswith("PARTIAL_QUERY:"):
-                    parts = reply.split(":", 3)
-                    if len(parts) >= 4:
-                        return parts[1]  # 返回语音文本部分
-                return reply
-        
-        # 天气查询
-        if self.weather_handler:
+            if reply and reply.startswith("PARTIAL_QUERY:"):
+                # 处理分页逻辑
+                parts = reply.split(":", 3)
+                if len(parts) >= 4:
+                    _, voice_text, total_str, displayed_str = parts
+                    try:
+                        total_count = int(total_str)
+                        displayed_count = int(displayed_str)
+                        if client:
+                            client["dialog_state"] = "waiting_schedule_continue"
+                            client["pending_schedule_data"] = {
+                                "total_count": total_count,
+                                "displayed_count": displayed_count,
+                                "voice_text": voice_text
+                            }
+                        reply = voice_text
+                    except ValueError:
+                        pass
+        elif intent == "weather" and self.weather_handler:
             reply = self.weather_handler.handle(text)
-            if reply:
-                return reply
-        
-        # 新闻查询
-        if self.news_handler:
+        elif intent == "news" and self.news_handler:
             reply = self.news_handler.handle(text)
-            if reply:
-                return reply
-        
-        # 节日提醒
-        if self.festival_handler:
+        elif intent == "festival" and self.festival_handler:
             reply = self.festival_handler.handle(text)
-            if reply:
-                return reply
+            
+        return reply
+
+    def _handle_schedule_continue(self, text: str, client: Dict) -> Optional[str]:
+        """处理日程继续念的请求"""
+        text = text.lower().strip()
         
-        return None
+        affirmative_keywords = [
+            "继续", "念完", "全部说完", "剩下的", "对", "是的", "好", "嗯",
+            "yes", "yep", "go ahead", "tell me", "继续念"
+        ]
+        is_affirmative = any(keyword in text for keyword in affirmative_keywords)
+
+        if not is_affirmative:
+            negative_keywords = ["不用", "不念了", "算了", "no", "nope", "stop", "够了"]
+            is_negative = any(keyword in text for keyword in negative_keywords)
+            if is_negative:
+                return "好的，不继续念了。"
+            # 如果既不是肯定也不是否定，可能是在说别的，这里为了简单起见，如果不肯定就认为不念了，或者默认chat?
+            # main.py 中 return None 会导致 continue loop，但这里我们需要返回回复。
+            # 这里简单处理：如果不匹配肯定词，就认为是不念了，或者是新的指令？
+            # 为了更好的体验，如果没匹配到，可以返回None让外层继续走意图分类。
+            # 但 main.py 是如果 dialog_state 存在，就强制进入这里。
+            # 修改 main.py 逻辑：如果不匹配，return None，则 dialog_state 应该保留还是清除？
+            # main.py 若返回None (implicitly), dialog_state 没有被清除，下一次继续。
+            # 这里我们如果返回 None, 外层会当做没有处理，进入意图分类。
+            # 所以如果不是肯定也不是否定，我们返回None，并且保留 dialog_state ? 
+            # 不，main.py 逻辑是:
+            # if is_negative: return "..."
+            # if not pending_schedule_data: return "..."
+            # ...
+            # 只有最后 return "继续念..."
+            # 如果不匹配 affirmative 且不匹配 negative -> main.py implicitly returns None
+            return None
+
+        pending_data = client.get("pending_schedule_data", {})
+        if not pending_data:
+            return "抱歉，我记不清刚才的内容了。"
+
+        total_count = pending_data.get("total_count", 0)
+        displayed_count = pending_data.get("displayed_count", 0)
+
+        remaining_items = self.schedule_handler.manager.list_items()
+        # 注意：这里 list_items 可能拿到最新的，如果期间有变动可能会有微小偏差，但通常可接受
+        remaining_items = remaining_items[displayed_count:]
+
+        if not remaining_items:
+            return "没有更多日程了。"
+
+        lines = []
+        for i, it in enumerate(remaining_items, displayed_count + 1):
+            time_part = f"{it.time}，" if it.time else ""
+            lines.append(f"第{i}条，{time_part}{it.title}，编号是{it.id}")
+
+        return "继续念剩下的：" + " ".join(lines) + "。"
 
     # ==================== WebSocket 处理 ====================
     
@@ -382,7 +557,9 @@ class VoiceServer:
         self.clients[client_id] = {
             "websocket": websocket,
             "audio_buffer": bytearray(),
-            "state": SystemState.IDLE
+            "state": SystemState.IDLE,
+            "dialog_state": None,
+            "pending_schedule_data": {}
         }
         
         try:
@@ -443,14 +620,19 @@ class VoiceServer:
                 audio_data = bytes(client["audio_buffer"])
                 client["audio_buffer"] = bytearray()
                 
-                # 异步处理 (避免阻塞)
+                # 异步处理 (避免阻塞 WebSocket 心跳)
+                # 使用 create_task 将耗时任务扔到后台，不等待其完成
                 asyncio.create_task(
-                    self.process_and_respond(websocket, audio_data)
+                    self.process_and_respond(websocket, client_id, audio_data)
                 )
-    
-    async def process_and_respond(self, websocket, audio_data: bytes):
-        """处理音频并返回响应"""
+
+    async def process_and_respond(self, websocket, client_id: str, audio_data: bytes):
+        """处理音频并返回响应 (后台任务)"""
         try:
+            client = self.clients.get(client_id)
+            if not client:
+                return
+
             # 1. ASR 识别
             asr_result = await asyncio.get_event_loop().run_in_executor(
                 None, self.process_asr, audio_data
@@ -474,22 +656,46 @@ class VoiceServer:
                 await self.send_state(websocket, "idle")
                 return
             
-            # 2. 检查功能命令
-            feature_reply = await asyncio.get_event_loop().run_in_executor(
-                None, self.handle_features, text, speaker
-            )
+            reply_text = None
             
-            if feature_reply:
-                reply_text = feature_reply
-            else:
-                # 3. 调用 LLM
-                reply_text = await asyncio.get_event_loop().run_in_executor(
-                    None, self.process_llm, text, emotion, speaker
+            # 2. 检查由多轮对话状态 (如日程继续)
+            if client["dialog_state"] == "waiting_schedule_continue":
+                continue_reply = await asyncio.get_event_loop().run_in_executor(
+                    None, self._handle_schedule_continue, text, client
                 )
+                if continue_reply:
+                    print(f"[Server] 日程继续回复: {continue_reply}")
+                    reply_text = continue_reply
+                    # 状态重置在 _handle_schedule_continue 内部或是这里做了
+                    # _handle_schedule_continue 只返回文本，我们需要在这里重置状态
+                    # 实际上 _handle_schedule_continue 需要访问 client pending data
+                    # 我们修改了 _handle_schedule_continue 接收 client dict
+                    client["dialog_state"] = None
+                    client["pending_schedule_data"] = {}
             
+            if not reply_text:
+                # 3. 意图分类
+                intent = await asyncio.get_event_loop().run_in_executor(
+                    None, self.classify_intent, text
+                )
+                print(f"[Server] 意图分类: {intent}")
+                
+                # 4. 根据意图分发
+                if intent == "chat":
+                    reply_text = await asyncio.get_event_loop().run_in_executor(
+                        None, self._generate_chat_response, text, emotion, speaker
+                    )
+                else:
+                    # 功能处理
+                    reply_text = await asyncio.get_event_loop().run_in_executor(
+                        None, self.handle_features_by_intent, intent, text, speaker, client
+                    )
+                    if not reply_text:
+                        reply_text = "抱歉，我没有理解您的意思，请再试一次。"
+
             print(f"[Server] 回复: {reply_text}")
             
-            # 4. TTS 合成
+            # 5. TTS 合成
             await self.send_state(websocket, "speaking")
             
             wav_data = await asyncio.get_event_loop().run_in_executor(
@@ -498,17 +704,22 @@ class VoiceServer:
             
             if wav_data:
                 # 发送 TTS 音频
+                # 增加一个延时，确保客户端有时间处理上一条消息（如果存在并发问题）
+                await asyncio.sleep(0.1)
                 await websocket.send(json.dumps({
                     "type": "tts_audio",
                     "text": reply_text,
                     "data": base64.b64encode(wav_data).decode("utf-8"),
                     "is_final": True
                 }))
+                print("[Server] TTS音频已发送")
             
             await self.send_state(websocket, "idle")
             
         except Exception as e:
             print(f"[Server] 处理错误: {e}")
+            import traceback
+            traceback.print_exc()
             await self.send_state(websocket, "idle")
     
     async def send_state(self, websocket, state: str):

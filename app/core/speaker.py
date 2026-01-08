@@ -4,6 +4,21 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 import torch
 import torchaudio
+
+# 修复 torchaudio 2.1+ 兼容性问题
+# 新版本移除了 list_audio_backends，需要添加兼容层
+if not hasattr(torchaudio, 'list_audio_backends'):
+    # 添加缺失的函数
+    def _list_audio_backends():
+        """兼容层：返回可用的音频后端"""
+        try:
+            # 新版本使用不同的 API
+            return list(torchaudio.utils.sox_utils.list_effects()) if hasattr(torchaudio.utils, 'sox_utils') else ['soundfile']
+        except:
+            return ['soundfile']
+    
+    torchaudio.list_audio_backends = _list_audio_backends
+
 from sklearn.metrics.pairwise import cosine_similarity
 from app.core.config import (
     SPEAKER_MODEL_PATH, SPEAKER_EMBEDDING_DIM, SPEAKER_SAMPLE_RATE,

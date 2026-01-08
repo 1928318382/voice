@@ -1,7 +1,7 @@
-# client.py
+# app/client/client.py
 """
-语音助手客户端 (树莓派端)
-连接服务器，发送音频，接收并播放 TTS
+语音助手客户端 v5 - USB 麦克风版本
+适配 UGREEN CM379 USB Audio (双通道 16位)
 """
 import asyncio
 import json
@@ -9,419 +9,382 @@ import base64
 import time
 import sys
 import threading
-import argparse
-import tempfile
+import subprocess
 import os
-from enum import Enum, auto
+import tempfile
+from datetime import datetime
 
 import websockets
-from websockets.client import connect
+try:
+    from websockets.client import connect as ws_connect
+except ImportError:
+    from websockets import connect as ws_connect
 
 from client_config import (
     SERVER_HOST, SERVER_PORT,
     AUTO_RECONNECT, RECONNECT_INTERVAL, MAX_RECONNECT_ATTEMPTS,
-    SAMPLE_RATE, CHUNK_SIZE, MIC_DEVICE_INDEX,
-    ENABLE_LED, MOCK_MODE
+    SAMPLE_RATE, MIC_HW_ID, MIC_CHANNELS, MIC_FORMAT, MOCK_MODE
 )
 
-
-class SystemState(Enum):
-    """系统状态"""
-    IDLE = auto()
-    LISTENING = auto()
-    THINKING = auto()
-    SPEAKING = auto()
-    ERROR = auto()
+# 播放设备 (ReSpeaker 板载扬声器)
+PLAYBACK_DEVICE = "plughw:3,0"
 
 
-class LEDController:
-    """LED 控制器"""
+def log(msg):
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}")
+
+
+class AudioManager:
+    """音频管理器 - USB 麦克风版本"""
     
-    def __init__(self, mock=False):
-        self.mock = mock or not ENABLE_LED
-        if not self.mock:
-            try:
-                from gpiozero import LED
-                from client_config import LED_PIN_BLUE, LED_PIN_GREEN
-                self.led_blue = LED(LED_PIN_BLUE)
-                self.led_green = LED(LED_PIN_GREEN)
-            except Exception as e:
-                print(f"[LED] GPIO 初始化失败: {e}，使用模拟模式")
-                self.mock = True
+    def __init__(self):
+        self.recording = False
+        self.record_proc = None
+        self.temp_file = None
+        
+        log(f"[音频] 录音设备: {MIC_HW_ID}")
+        log(f"[音频] 录音格式: {MIC_CHANNELS}通道 {MIC_FORMAT}")
     
-    def set_state(self, state: SystemState):
-        """根据状态设置 LED"""
-        if self.mock:
-            color_map = {
-                SystemState.IDLE: "⚫ OFF",
-                SystemState.LISTENING: "🔵 BLUE",
-                SystemState.THINKING: "🟡 YELLOW",
-                SystemState.SPEAKING: "🟢 GREEN",
-                SystemState.ERROR: "🔴 RED"
-            }
-            print(f"  [LED] {color_map.get(state, 'UNKNOWN')}")
+    def start_recording(self):
+        """开始录音"""
+        if self.recording:
             return
-        
-        self.led_blue.off()
-        self.led_green.off()
-        
-        if state == SystemState.LISTENING:
-            self.led_blue.on()
-        elif state == SystemState.SPEAKING:
-            self.led_green.on()
-
-
-class AudioDevice:
-    """音频设备管理"""
-    
-    def __init__(self, mock=False):
-        self.mock = mock
-        self.pa = None
-        self.stream = None
-        
-        if not mock:
-            try:
-                import pyaudio
-                self.pa = pyaudio.PyAudio()
-            except Exception as e:
-                print(f"[Audio] PyAudio 初始化失败: {e}，使用模拟模式")
-                self.mock = True
-    
-    def start_stream(self):
-        """启动录音流"""
-        if self.mock:
-            print("[Audio] 模拟麦克风已启动")
-            return
-        
-        try:
-            import pyaudio
-            self.stream = self.pa.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=SAMPLE_RATE,
-                input=True,
-                input_device_index=MIC_DEVICE_INDEX,
-                frames_per_buffer=CHUNK_SIZE
-            )
-            print("[Audio] 麦克风已启动")
-        except Exception as e:
-            print(f"[Audio] 麦克风启动失败: {e}")
-            self.mock = True
-    
-    def read_chunk(self) -> bytes:
-        """读取一帧音频"""
-        if self.mock:
-            time.sleep(CHUNK_SIZE / SAMPLE_RATE)
-            import numpy as np
-            return np.zeros(CHUNK_SIZE, dtype=np.int16).tobytes()
-        
-        if self.stream:
-            try:
-                return self.stream.read(CHUNK_SIZE, exception_on_overflow=False)
-            except Exception as e:
-                print(f"[Audio] 读取错误: {e}")
-        return b''
-    
-    def stop_stream(self):
-        """停止录音流"""
-        if self.stream:
-            try:
-                self.stream.stop_stream()
-                self.stream.close()
-            except Exception:
-                pass
-    
-    def play_wav(self, wav_data: bytes):
-        """播放 WAV 数据"""
-        if self.mock:
-            print("[Audio] 模拟播放音频...")
-            time.sleep(1)
-            return
-        
-        try:
-            # 写入临时文件并播放
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                f.write(wav_data)
-                tmp_file = f.name
             
-            try:
-                if sys.platform.startswith("win"):
-                    import winsound
-                    winsound.PlaySound(tmp_file, winsound.SND_FILENAME)
-                elif sys.platform == "darwin":
-                    import subprocess
-                    subprocess.run(["afplay", tmp_file], check=False)
-                else:
-                    import subprocess
-                    subprocess.run(["aplay", tmp_file], check=False)
-            finally:
-                if os.path.exists(tmp_file):
-                    os.remove(tmp_file)
-                    
+        log("[录音] 开始...")
+        
+        # 清理残留进程
+        subprocess.run(["pkill", "-9", "arecord"], capture_output=True)
+        time.sleep(0.1)
+        
+        # 临时文件
+        self.temp_file = tempfile.mktemp(suffix=".wav")
+        
+        try:
+            # USB 麦克风录制命令
+            cmd = [
+                "arecord",
+                "-D", MIC_HW_ID,          # plughw:4,0
+                "-f", MIC_FORMAT,          # S16_LE
+                "-r", str(SAMPLE_RATE),    # 16000
+                "-c", str(MIC_CHANNELS),   # 2
+                "-t", "wav",               # WAV 格式
+                "-q",                      # 安静模式
+                self.temp_file
+            ]
+            
+            log(f"[录音] 命令: {' '.join(cmd)}")
+            self.record_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.recording = True
+            log(f"[录音] PID={self.record_proc.pid}")
+            
         except Exception as e:
-            print(f"[Audio] 播放失败: {e}")
+            log(f"[录音] 启动失败: {e}")
+            self.recording = False
+    
+    def stop_recording(self) -> bytes:
+        """停止录音并返回 PCM 数据"""
+        if not self.recording:
+            return b''
+        
+        log("[录音] 停止...")
+        self.recording = False
+        audio_data = b''
+        
+        try:
+            # 停止录音进程
+            if self.record_proc:
+                self.record_proc.terminate()
+                try:
+                    self.record_proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.record_proc.kill()
+                    self.record_proc.wait()
+                self.record_proc = None
+            
+            time.sleep(0.2)
+            
+            # 读取录音文件并转换为单通道 PCM
+            if self.temp_file and os.path.exists(self.temp_file):
+                file_size = os.path.getsize(self.temp_file)
+                log(f"[录音] WAV 文件: {file_size} bytes")
+                
+                # 使用 sox 转换: 双通道 -> 单通道 PCM
+                pcm_file = tempfile.mktemp(suffix=".raw")
+                
+                result = subprocess.run([
+                    "sox",
+                    self.temp_file,                 # 输入 WAV
+                    "-t", "raw",                    # 输出格式
+                    "-r", str(SAMPLE_RATE),         # 采样率
+                    "-b", "16",                     # 16 位
+                    "-c", "1",                      # 单通道
+                    "-e", "signed-integer",         # 有符号整数
+                    pcm_file,                       # 输出文件
+                    "remix", "1,2"                  # 混合两个通道
+                ], capture_output=True, timeout=10)
+                
+                if result.returncode == 0 and os.path.exists(pcm_file):
+                    with open(pcm_file, 'rb') as f:
+                        audio_data = f.read()
+                    os.remove(pcm_file)
+                    
+                    duration = len(audio_data) / SAMPLE_RATE / 2
+                    log(f"[录音] PCM: {len(audio_data)} bytes ({duration:.1f}秒)")
+                else:
+                    log(f"[录音] sox 转换失败: {result.stderr.decode()}")
+                
+                # 清理临时文件
+                os.remove(self.temp_file)
+                self.temp_file = None
+                
+        except Exception as e:
+            log(f"[录音] 错误: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return audio_data
+    
+    def play_audio(self, wav_data: bytes):
+        """播放音频"""
+        if not wav_data:
+            return
+            
+        tmp_file = None
+        try:
+            tmp_file = tempfile.mktemp(suffix=".wav")
+            with open(tmp_file, 'wb') as f:
+                f.write(wav_data)
+            
+            log(f"[播放] 开始 ({len(wav_data)} bytes)")
+            
+            # 使用 ReSpeaker 播放设备
+            proc = subprocess.Popen(
+                ["aplay", "-D", PLAYBACK_DEVICE, "-q", tmp_file],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            proc.wait(timeout=60)
+            log("[播放] 完成")
+            
+        except subprocess.TimeoutExpired:
+            log("[播放] 超时")
+        except Exception as e:
+            log(f"[播放] 失败: {e}")
+        finally:
+            if tmp_file and os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except:
+                    pass
 
 
 class VoiceClient:
-    """语音助手客户端"""
+    """语音客户端"""
     
-    def __init__(self, mock=False):
-        self.mock = mock or MOCK_MODE
+    def __init__(self):
+        self.ws = None
+        self.audio = AudioManager()
+        self.is_recording = False
         self.running = True
         self.connected = False
-        self.websocket = None
-        self.state = SystemState.IDLE
-        self.reconnect_count = 0
         
-        # 硬件
-        self.led = LEDController(mock=self.mock)
-        self.audio = AudioDevice(mock=self.mock)
-        
-        # 录音控制
-        self.is_recording = False
-        self.audio_buffer = bytearray()
-        
-        # 命令队列
-        self.cmd_queue = asyncio.Queue()
-    
-    def set_state(self, state: SystemState):
-        """设置状态"""
-        self.state = state
-        self.led.set_state(state)
-    
-    async def connect_server(self):
+    async def connect(self):
         """连接服务器"""
         uri = f"ws://{SERVER_HOST}:{SERVER_PORT}"
-        print(f"[Client] 正在连接服务器: {uri}")
+        log(f"连接 {uri}...")
         
         try:
-            self.websocket = await connect(
+            self.ws = await ws_connect(
                 uri,
-                max_size=10 * 1024 * 1024  # 10MB
+                max_size=20*1024*1024,
+                ping_interval=None,
+                ping_timeout=None,
+                close_timeout=30
             )
             self.connected = True
-            self.reconnect_count = 0
-            print("[Client] ✅ 已连接到服务器")
+            log("✅ 已连接")
             return True
         except Exception as e:
-            print(f"[Client] ❌ 连接失败: {e}")
-            self.connected = False
+            log(f"❌ 连接失败: {e}")
             return False
     
-    async def handle_messages(self):
-        """处理服务器消息"""
+    async def send_audio(self, data: bytes):
+        """发送音频数据"""
+        if not self.ws or not data or not self.connected:
+            return
+            
         try:
-            async for message in self.websocket:
-                try:
-                    data = json.loads(message)
-                    await self.process_server_message(data)
-                except json.JSONDecodeError:
-                    print("[Client] 收到无效消息")
-        except websockets.exceptions.ConnectionClosed:
-            print("[Client] 连接已断开")
+            await self.ws.send(json.dumps({"type": "audio", "action": "start"}))
+            
+            # 分块发送
+            chunk_size = 32 * 1024
+            for i in range(0, len(data), chunk_size):
+                chunk = data[i:i+chunk_size]
+                await self.ws.send(json.dumps({
+                    "type": "audio",
+                    "action": "data",
+                    "data": base64.b64encode(chunk).decode()
+                }))
+            
+            await self.ws.send(json.dumps({"type": "audio", "action": "end"}))
+            log("音频已发送")
+            
+        except Exception as e:
+            log(f"发送失败: {e}")
             self.connected = False
     
-    async def process_server_message(self, data: dict):
+    async def message_handler(self):
         """处理服务器消息"""
-        msg_type = data.get("type", "")
+        try:
+            async for msg in self.ws:
+                if not self.connected:
+                    break
+                    
+                try:
+                    data = json.loads(msg)
+                    msg_type = data.get("type", "")
+                    
+                    if msg_type == "asr_result":
+                        text = data.get("text", "")
+                        print(f"\n💬 识别: {text}")
+                        
+                    elif msg_type == "tts_audio":
+                        text = data.get("text", "")
+                        print(f"\n🔊 回复: {text}")
+                        
+                        if data.get("data"):
+                            audio_bytes = base64.b64decode(data["data"])
+                            threading.Thread(
+                                target=self.audio.play_audio,
+                                args=(audio_bytes,),
+                                daemon=True
+                            ).start()
+                            
+                    elif msg_type == "state":
+                        state = data.get("state", "")
+                        if state == "idle":
+                            log("服务器处理完成")
+                            
+                except Exception as e:
+                    log(f"处理消息错误: {e}")
+                    
+        except websockets.exceptions.ConnectionClosed as e:
+            log(f"⚠️ 连接关闭: code={e.code}, reason='{e.reason}'")
+        except Exception as e:
+            log(f"❌ 消息处理错误: {e}")
+            import traceback
+            traceback.print_exc()
         
-        if msg_type == "connected":
-            print(f"[Server] {data.get('message', '')}")
-            
-        elif msg_type == "state":
-            state_str = data.get("state", "idle")
-            state_map = {
-                "idle": SystemState.IDLE,
-                "listening": SystemState.LISTENING,
-                "thinking": SystemState.THINKING,
-                "speaking": SystemState.SPEAKING
-            }
-            self.set_state(state_map.get(state_str, SystemState.IDLE))
-            
-        elif msg_type == "asr_result":
-            text = data.get("text", "")
-            emotion = data.get("emotion", "neutral")
-            speaker = data.get("speaker", "unknown")
-            if text:
-                print(f"\n💬 识别: {text}")
-                if speaker != "unknown":
-                    print(f"   👤 说话人: {speaker} | 😊 情绪: {emotion}")
-            
-        elif msg_type == "tts_audio":
-            text = data.get("text", "")
-            audio_b64 = data.get("data", "")
-            
-            print(f"\n🔊 回复: {text}")
-            
-            if audio_b64:
-                wav_data = base64.b64decode(audio_b64)
-                # 在新线程中播放，避免阻塞
-                threading.Thread(
-                    target=self.audio.play_wav, 
-                    args=(wav_data,),
-                    daemon=True
-                ).start()
+        self.connected = False
     
-    async def send_audio_start(self):
-        """发送录音开始信号"""
-        if self.websocket:
-            await self.websocket.send(json.dumps({
-                "type": "audio",
-                "action": "start"
-            }))
-    
-    async def send_audio_data(self, data: bytes):
-        """发送音频数据"""
-        if self.websocket:
-            await self.websocket.send(json.dumps({
-                "type": "audio",
-                "action": "data",
-                "data": base64.b64encode(data).decode("utf-8")
-            }))
-    
-    async def send_audio_end(self):
-        """发送录音结束信号"""
-        if self.websocket:
-            await self.websocket.send(json.dumps({
-                "type": "audio",
-                "action": "end"
-            }))
-    
-    def console_listener(self):
-        """控制台监听线程"""
+    def keyboard_thread(self, loop):
+        """键盘输入监听"""
         while self.running:
             try:
-                cmd = input()
-                asyncio.run_coroutine_threadsafe(
-                    self.cmd_queue.put(cmd.strip().lower()),
-                    self.loop
-                )
+                input()
+                if self.connected:
+                    asyncio.run_coroutine_threadsafe(
+                        self.toggle_record(), loop
+                    )
             except EOFError:
                 break
-    
-    async def handle_commands(self):
-        """处理键盘命令"""
-        while self.running:
-            try:
-                cmd = await asyncio.wait_for(
-                    self.cmd_queue.get(), 
-                    timeout=0.05
-                )
-                
-                if cmd == "q":
-                    print("\n[Client] 正在退出...")
-                    self.running = False
-                    break
-                else:
-                    # 切换录音状态
-                    if self.is_recording:
-                        # 停止录音
-                        print("\n✅ 录音结束，正在发送...")
-                        self.is_recording = False
-                        self.set_state(SystemState.THINKING)
-                        await self.send_audio_end()
-                    else:
-                        # 开始录音
-                        if not self.connected:
-                            print("\n❌ 未连接到服务器")
-                            continue
-                        print("\n🔴 正在录音... (说完按回车)")
-                        self.is_recording = True
-                        self.set_state(SystemState.LISTENING)
-                        self.audio_buffer.clear()
-                        await self.send_audio_start()
-                        
-            except asyncio.TimeoutError:
+            except:
                 pass
     
-    async def record_loop(self):
-        """录音循环"""
-        self.audio.start_stream()
-        
-        while self.running:
-            if self.is_recording:
-                chunk = self.audio.read_chunk()
-                if chunk:
-                    self.audio_buffer.extend(chunk)
-                    # 每 10 帧发送一次 (约 0.6 秒)
-                    if len(self.audio_buffer) >= CHUNK_SIZE * 2 * 10:
-                        await self.send_audio_data(bytes(self.audio_buffer))
-                        self.audio_buffer.clear()
+    async def toggle_record(self):
+        """切换录音状态"""
+        if self.is_recording:
+            print("\n⏹ 停止录音...")
+            self.is_recording = False
+            
+            loop = asyncio.get_event_loop()
+            audio_data = await loop.run_in_executor(None, self.audio.stop_recording)
+            
+            if len(audio_data) > 3200:
+                await self.send_audio(audio_data)
             else:
-                await asyncio.sleep(0.01)
-        
-        self.audio.stop_stream()
+                print("⚠️ 录音太短")
+        else:
+            print("\n🔴 开始录音... (按回车停止)")
+            self.is_recording = True
+            
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.audio.start_recording)
     
     async def run(self):
-        """主运行循环"""
-        self.loop = asyncio.get_event_loop()
+        """主循环"""
+        loop = asyncio.get_event_loop()
         
-        print("=" * 50)
-        print("  语音助手客户端 (树莓派)")
-        print("  [回车键] 切换录音/停止")
-        print("  [q] + 回车 退出")
-        print("=" * 50)
+        threading.Thread(
+            target=self.keyboard_thread,
+            args=(loop,),
+            daemon=True
+        ).start()
         
-        # 启动控制台监听线程
-        console_thread = threading.Thread(target=self.console_listener, daemon=True)
-        console_thread.start()
+        retry_count = 0
         
         while self.running:
-            # 连接服务器
-            if not await self.connect_server():
-                if AUTO_RECONNECT and self.reconnect_count < MAX_RECONNECT_ATTEMPTS:
-                    self.reconnect_count += 1
-                    print(f"[Client] {RECONNECT_INTERVAL} 秒后重试 ({self.reconnect_count}/{MAX_RECONNECT_ATTEMPTS})...")
-                    await asyncio.sleep(RECONNECT_INTERVAL)
-                    continue
-                else:
-                    print("[Client] 无法连接服务器，退出")
+            if not await self.connect():
+                retry_count += 1
+                if retry_count >= MAX_RECONNECT_ATTEMPTS:
+                    log("达到最大重试次数，退出")
                     break
-            
-            self.set_state(SystemState.IDLE)
-            print("\n[Client] 就绪，按回车开始对话...")
-            
-            # 启动任务
-            try:
-                await asyncio.gather(
-                    self.handle_messages(),
-                    self.handle_commands(),
-                    self.record_loop()
-                )
-            except Exception as e:
-                print(f"[Client] 错误: {e}")
-            
-            if not self.running:
-                break
-            
-            # 断线重连
-            if AUTO_RECONNECT:
-                print("[Client] 尝试重新连接...")
+                log(f"{RECONNECT_INTERVAL}秒后重试 ({retry_count}/{MAX_RECONNECT_ATTEMPTS})...")
                 await asyncio.sleep(RECONNECT_INTERVAL)
+                continue
+            
+            retry_count = 0
+            
+            print("\n" + "="*40)
+            print("  🎤 按 [回车] 开始/停止录音")
+            print("  🚪 按 [Ctrl+C] 退出")
+            print("="*40 + "\n")
+            
+            await self.message_handler()
+            
+            log("连接断开")
+            self.connected = False
+            
+            if self.ws:
+                try:
+                    await self.ws.close()
+                except:
+                    pass
+                self.ws = None
+            
+            if self.running and AUTO_RECONNECT:
+                log("准备重连...")
+                await asyncio.sleep(2)
+            else:
+                break
+        
+        log("客户端退出")
 
 
 def main():
-    """主函数"""
-    parser = argparse.ArgumentParser(description="语音助手客户端")
-    parser.add_argument("--mock", action="store_true", help="模拟模式")
-    parser.add_argument("--host", type=str, help="服务器地址")
-    parser.add_argument("--port", type=int, help="服务器端口")
-    args = parser.parse_args()
+    print("="*50)
+    print("  语音助手客户端 v5")
+    print("  (USB 麦克风版本)")
+    print("="*50)
     
-    # 覆盖配置
-    if args.host:
-        import client_config
-        client_config.SERVER_HOST = args.host
-    if args.port:
-        import client_config
-        client_config.SERVER_PORT = args.port
-    
-    client = VoiceClient(mock=args.mock)
+    client = VoiceClient()
     
     try:
         asyncio.run(client.run())
     except KeyboardInterrupt:
-        print("\n[Client] 已退出")
+        print("\n退出")
+    except Exception as e:
+        log(f"❌ 程序崩溃: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        client.running = False
+        log("程序结束")
 
 
 if __name__ == "__main__":
