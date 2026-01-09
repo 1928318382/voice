@@ -370,90 +370,410 @@ class VoiceServer:
             return "chat"
 
 
-    # ==================== TTS 处理 ====================
+    # ==================== TTS 处理 (Coqui TTS) ====================
+    
+    # 句子最大长度（字符数），超过则分段
+    MAX_SENTENCE_LENGTH = 80
+    
+    def _normalize_text(self, text: str) -> str:
+        """清洗文本以减少 TTS 词表缺失导致的异常发音。"""
+        import re
+        if not text:
+            return ""
+        
+        # Convert newlines to sentence delimiters to preserve list structure
+        text = re.sub(r'\n+', '。', text)
+        
+        # 先处理日期
+        text = self._convert_dates_in_text(text)
+
+        # 将数字转换为中文读法
+        text = self._convert_numbers_in_text(text)
+        
+        # 清理不常见符号 (保留字母)
+        text = re.sub(r"[^\u4e00-\u9fffA-Za-z，。！？、；：,.!?…~\s]", " ", text)
+        # 统一空白
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+    
+    def _convert_dates_in_text(self, text: str) -> str:
+        """将日期格式 (如 2026-1-7, 2026/01/07) 转换为中文读法"""
+        import re
+        CHINESE_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+        
+        def replace_date(match):
+            year = match.group(1)
+            month = match.group(2)
+            day = match.group(3)
+            
+            # 年份逐位读
+            year_chinese = "".join(CHINESE_DIGITS[int(d)] for d in year)
+            
+            # 月份和日期按整数读
+            month_chinese = self._integer_to_chinese(month)
+            day_chinese = self._integer_to_chinese(day)
+            
+            return f"{year_chinese}年{month_chinese}月{day_chinese}日"
+
+        pattern = r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:日)?'
+        return re.sub(pattern, replace_date, text)
+    
+    def _convert_numbers_in_text(self, text: str) -> str:
+        """将文本中的数字转换为中文读法"""
+        import re
+        def replace_number(match):
+            num = match.group(0)
+            return self._number_to_chinese(num)
+        
+        pattern = r'(?<!\d)-?\d+\.?\d*'
+        return re.sub(pattern, replace_number, text)
+    
+    def _number_to_chinese(self, num_str: str) -> str:
+        """将数字字符串转换为中文读法"""
+        CHINESE_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+        
+        if not num_str:
+            return ""
+        
+        # 处理小数
+        if '.' in num_str:
+            parts = num_str.split('.', 1)
+            integer_part = self._integer_to_chinese(parts[0])
+            decimal_part = ''.join(CHINESE_DIGITS[int(d)] for d in parts[1] if d.isdigit())
+            return f"{integer_part}点{decimal_part}" if decimal_part else integer_part
+        
+        return self._integer_to_chinese(num_str)
+    
+    def _integer_to_chinese(self, num_str: str) -> str:
+        """将整数字符串转换为中文"""
+        CHINESE_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+        CHINESE_UNITS = ['', '十', '百', '千']
+        CHINESE_BIG_UNITS = ['', '万', '亿', '兆']
+        
+        if not num_str:
+            return ""
+        
+        # 去除前导零
+        num_str = num_str.lstrip('0') or '0'
+        
+        if num_str == '0':
+            return '零'
+        
+        # 处理负数
+        if num_str.startswith('-'):
+            return '负' + self._integer_to_chinese(num_str[1:])
+        
+        # 对于特别长的数字（如电话号码），逐位读出
+        if len(num_str) > 8:
+            return ''.join(CHINESE_DIGITS[int(d)] for d in num_str if d.isdigit())
+        
+        result = []
+        
+        # 按4位一组处理
+        groups = []
+        while num_str:
+            groups.append(num_str[-4:])
+            num_str = num_str[:-4]
+        groups.reverse()
+        
+        for group_idx, group in enumerate(groups):
+            group_result = self._four_digits_to_chinese(group)
+            if group_result:
+                big_unit_idx = len(groups) - group_idx - 1
+                if big_unit_idx < len(CHINESE_BIG_UNITS):
+                    result.append(group_result + CHINESE_BIG_UNITS[big_unit_idx])
+                else:
+                    result.append(group_result)
+        
+        return ''.join(result)
+    
+    def _four_digits_to_chinese(self, num_str: str) -> str:
+        """将4位以内的数字转换为中文"""
+        CHINESE_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+        CHINESE_UNITS = ['', '十', '百', '千']
+        
+        if not num_str:
+            return ""
+        
+        num_str = num_str.lstrip('0') or '0'
+        if num_str == '0':
+            return ''
+        
+        result = []
+        length = len(num_str)
+        has_zero = False
+        
+        for i, digit in enumerate(num_str):
+            d = int(digit)
+            unit_idx = length - i - 1
+            
+            if d == 0:
+                has_zero = True
+            else:
+                if has_zero:
+                    result.append('零')
+                    has_zero = False
+                # 特殊处理"一十"读作"十"
+                if not (d == 1 and unit_idx == 1 and i == 0):
+                    result.append(CHINESE_DIGITS[d])
+                if unit_idx < len(CHINESE_UNITS):
+                    result.append(CHINESE_UNITS[unit_idx])
+        
+        return ''.join(result)
+    
+    def _split_long_text(self, text: str) -> list:
+        """将长文本按句子边界分割，确保每段不超过 MAX_SENTENCE_LENGTH"""
+        import re
+        
+        # 先按标点分句
+        sentence_delimiters = r'([。！？!?…~；;]|\n)'
+        parts = re.split(sentence_delimiters, text)
+        
+        # 重新组合：[句子, 标点, 句子, 标点, ...]
+        sentences = []
+        current = ""
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+            if re.match(sentence_delimiters, part):
+                current += part
+                if current.strip():
+                    sentences.append(current.strip())
+                current = ""
+            else:
+                current = part
+        if current.strip():
+            sentences.append(current.strip())
+        
+        # 合并短句，拆分超长句
+        result = []
+        buffer = ""
+        
+        for sentence in sentences:
+            # 如果单个句子就超长，按逗号进一步拆分
+            if len(sentence) > self.MAX_SENTENCE_LENGTH:
+                if buffer:
+                    result.append(buffer)
+                    buffer = ""
+                # 按逗号拆分
+                sub_sentences = re.split(r'([，,、])', sentence)
+                sub_buffer = ""
+                for sub in sub_sentences:
+                    if len(sub_buffer) + len(sub) <= self.MAX_SENTENCE_LENGTH:
+                        sub_buffer += sub
+                    else:
+                        if sub_buffer:
+                            result.append(sub_buffer)
+                        sub_buffer = sub
+                if sub_buffer:
+                    result.append(sub_buffer)
+            elif len(buffer) + len(sentence) <= self.MAX_SENTENCE_LENGTH:
+                buffer += sentence
+            else:
+                if buffer:
+                    result.append(buffer)
+                buffer = sentence
+        
+        if buffer:
+            result.append(buffer)
+        
+        return result if result else [text]
+    
+    def _postprocess_wav(self, path: str):
+        """针对 Tacotron2 的尾部问题进行后处理"""
+        y, sr = sf.read(path, dtype="float32")
+        if y.size == 0:
+            return
+
+        # 统一为单声道处理
+        if y.ndim > 1:
+            mono = y.mean(axis=1)
+        else:
+            mono = y.copy()
+
+        original_len = len(mono)
+        
+        # 基于能量梯度找到语音结束点
+        win_ms = 30
+        hop_ms = 10
+        win = int(sr * win_ms / 1000)
+        hop = int(sr * hop_ms / 1000)
+        
+        if len(mono) < win * 2:
+            return
+        
+        n_frames = (len(mono) - win) // hop + 1
+        rms = np.zeros(n_frames, dtype=np.float32)
+        
+        for i in range(n_frames):
+            start = i * hop
+            frame = mono[start:start + win]
+            rms[i] = np.sqrt(np.mean(frame ** 2)) if len(frame) > 0 else 0
+        
+        if len(rms) < 3:
+            return
+            
+        max_rms = np.max(rms)
+        if max_rms == 0:
+            return
+        
+        # 找到最后一个能量超过峰值 8% 的位置
+        energy_thresh = max_rms * 0.08
+        above_thresh = np.where(rms > energy_thresh)[0]
+        
+        if len(above_thresh) > 0:
+            last_active_frame = int(np.max(above_thresh))
+            energy_end = (last_active_frame * hop) + win
+        else:
+            energy_end = len(mono)
+        
+        final_end = energy_end
+        
+        # 确保至少保留 0.5 秒
+        min_len = int(sr * 0.5)
+        final_end = max(final_end, min_len)
+        final_end = min(final_end, len(mono))
+        
+        # 应用裁切
+        if final_end < len(y):
+            y = y[:final_end] if y.ndim == 1 else y[:final_end]
+        
+        # 后处理: 淡出
+        fade_len = min(int(sr * 0.05), len(y))
+        if fade_len > 1:
+            fade = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+            if y.ndim > 1:
+                y[-fade_len:, :] *= fade[:, None]
+            else:
+                y[-fade_len:] *= fade
+        
+        # 防止削波
+        peak = float(np.max(np.abs(y))) if y.size else 0.0
+        if peak > 0.95:
+            y = y * (0.95 / peak)
+        
+        sf.write(path, y, sr, subtype="PCM_16")
+        
+        if final_end < original_len:
+            removed_ms = (original_len - final_end) * 1000 // sr
+            print(f"[TTS] 裁切尾部 {removed_ms}ms")
     
     def process_tts(self, text: str) -> Optional[bytes]:
-        """使用 Edge TTS 将文本转换为语音，返回 WAV 数据"""
-        if not text:
+        """使用 Coqui TTS 将文本转换为语音，返回 WAV 数据"""
+        if not text or not self.tts_engine:
+            if not self.tts_engine:
+                print("[TTS] Coqui TTS 引擎未初始化")
             return None
         
         try:
-            import edge_tts
-            import asyncio
             import re
             
-            # 文本清洗（保留中英文）
-            text = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9，。！？、；：,.!?…~\s]", " ", text)
-            text = re.sub(r"\s+", " ", text).strip()
-            
+            # 文本预处理
+            text = self._normalize_text(text)
             if not text:
+                print("[TTS] 文本清洗后为空，跳过合成。")
                 return None
             
-            # 添加句号
-            if not text.endswith(("。", "！", "？", ".", "!", "?", "…", "~")):
-                text += "。"
+            # 分割长文本
+            segments = self._split_long_text(text)
+            print(f"[TTS] 文本分为 {len(segments)} 段处理")
             
-            # 使用 Edge TTS 合成
-            # 中文女声推荐: zh-CN-XiaoxiaoNeural, zh-CN-XiaoyiNeural
-            # 中文男声推荐: zh-CN-YunxiNeural, zh-CN-YunjianNeural
-            voice = "zh-CN-XiaoxiaoNeural"
+            all_wav_data = []
             
-            # 创建临时文件
-            mp3_file = tempfile.mktemp(suffix=".mp3")
-            wav_file = tempfile.mktemp(suffix=".wav")
-            
-            try:
-                # Edge TTS 是异步的，需要在事件循环中运行
-                async def synthesize():
-                    communicate = edge_tts.Communicate(text, voice)
-                    await communicate.save(mp3_file)
-                
-                # 创建新的事件循环运行
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(synthesize())
-                finally:
-                    loop.close()
-                
-                # 转换 MP3 到 WAV (使用 ffmpeg 或 sox)
-                import subprocess
-                result = subprocess.run([
-                    "ffmpeg", "-y", "-i", mp3_file,
-                    "-ar", "16000", "-ac", "1", "-acodec", "pcm_s16le",
-                    wav_file
-                ], capture_output=True, timeout=30)
-                
-                if result.returncode != 0:
-                    # 尝试使用 sox
-                    subprocess.run([
-                        "sox", mp3_file, "-r", "16000", "-c", "1", wav_file
-                    ], capture_output=True, timeout=30)
-                
-                # 读取 WAV 数据
-                if os.path.exists(wav_file):
-                    with open(wav_file, "rb") as f:
-                        wav_data = f.read()
-                    print(f"[TTS] Edge TTS 合成成功: {len(wav_data)} bytes")
-                    return wav_data
-                else:
-                    print("[TTS] WAV 文件生成失败")
-                    return None
+            for idx, segment in enumerate(segments):
+                segment = segment.strip()
+                if not segment:
+                    continue
                     
-            finally:
-                # 清理临时文件
-                for f in [mp3_file, wav_file]:
-                    if os.path.exists(f):
+                print(f"[TTS] 处理第 {idx + 1}/{len(segments)} 段: {segment[:50]}..." if len(segment) > 50 else f"[TTS] 处理第 {idx + 1}/{len(segments)} 段: {segment}")
+                
+                # 强制添加标点，帮助模型停止
+                if not segment.endswith(("。", "！", "？", ".", "!", "?", "…", "~")):
+                    segment += "。"
+                
+                # 创建临时文件
+                tmp_wav = tempfile.mktemp(suffix=".wav")
+                
+                try:
+                    # 合成
+                    self.tts_engine.tts_to_file(text=segment, file_path=tmp_wav)
+                    
+                    # 后处理：去除尾部静音/底噪
+                    try:
+                        self._postprocess_wav(tmp_wav)
+                    except Exception as e:
+                        print(f"[TTS] 音频后处理失败 (将使用原声): {e}")
+                    
+                    # 读取 WAV 数据
+                    if os.path.exists(tmp_wav):
+                        with open(tmp_wav, "rb") as f:
+                            wav_data = f.read()
+                        all_wav_data.append(wav_data)
+                        
+                finally:
+                    # 清理临时文件
+                    if os.path.exists(tmp_wav):
                         try:
-                            os.remove(f)
+                            os.remove(tmp_wav)
                         except:
                             pass
+            
+            if not all_wav_data:
+                return None
+            
+            # 如果只有一段，直接返回
+            if len(all_wav_data) == 1:
+                print(f"[TTS] Coqui TTS 合成成功: {len(all_wav_data[0])} bytes")
+                return all_wav_data[0]
+            
+            # 多段合并：简单拼接 PCM 数据（去掉 WAV 头）
+            # 这里简化处理：返回第一段（带头），后续段的纯 PCM 需要更复杂处理
+            # 为简单起见，我们返回拼接后的完整音频
+            combined_wav = self._combine_wav_files(all_wav_data)
+            print(f"[TTS] Coqui TTS 合成成功 (合并): {len(combined_wav)} bytes")
+            return combined_wav
                     
         except Exception as e:
-            print(f"[TTS] Edge TTS 合成失败: {e}")
+            print(f"[TTS] Coqui TTS 合成失败: {e}")
             import traceback
             traceback.print_exc()
             return None
+    
+    def _combine_wav_files(self, wav_data_list: list) -> bytes:
+        """合并多个 WAV 数据为一个"""
+        if not wav_data_list:
+            return b''
+        if len(wav_data_list) == 1:
+            return wav_data_list[0]
+        
+        try:
+            import io
+            import wave
+            
+            # 读取所有音频数据
+            all_frames = []
+            params = None
+            
+            for wav_data in wav_data_list:
+                with io.BytesIO(wav_data) as bio:
+                    with wave.open(bio, 'rb') as wf:
+                        if params is None:
+                            params = wf.getparams()
+                        all_frames.append(wf.readframes(wf.getnframes()))
+            
+            # 写入合并后的 WAV
+            output = io.BytesIO()
+            with wave.open(output, 'wb') as wf:
+                wf.setparams(params)
+                for frames in all_frames:
+                    wf.writeframes(frames)
+            
+            return output.getvalue()
+            
+        except Exception as e:
+            print(f"[TTS] WAV 合并失败: {e}")
+            # 如果合并失败，返回第一段
+            return wav_data_list[0] if wav_data_list else b''
 
     # ==================== 功能处理 ====================
     
